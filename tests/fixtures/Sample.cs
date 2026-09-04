@@ -19,11 +19,14 @@ namespace Shapes
         {
             public bool Enabled;
             public string Label;
+            public string ReadOnly { get; }
+            public int Count { get; set; } = 42;
 
             public Settings(string label)
             {
                 Label = label;
                 Enabled = true;
+                ReadOnly = "default";
             }
         }
 
@@ -143,6 +146,40 @@ namespace Shapes
         {
             result = 0;
             return int.TryParse(s, out result);
+        }
+
+        private object _sync = new object();
+        public int Counter = 0;
+        public void IncrementThreadSafe()
+        {
+            lock (_sync)
+            {
+                Counter++;
+            }
+        }
+
+        public string ReadFile(string path)
+        {
+            using (System.IO.StreamReader reader = new System.IO.StreamReader(path))
+            {
+                return reader.ReadToEnd();
+            }
+        }
+
+        public int SumList(System.Collections.Generic.List<int> numbers)
+        {
+            int sum = 0;
+            foreach (int n in numbers)
+            {
+                sum += n;
+            }
+            return sum;
+        }
+
+        public System.Collections.Generic.List<int> MakeList()
+        {
+            var list = new System.Collections.Generic.List<int> { 1, 2, 3 };
+            return list;
         }
     }
 

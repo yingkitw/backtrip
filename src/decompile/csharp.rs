@@ -615,6 +615,18 @@ fn decompile_body(
     // Post-process: convert while loops with init+increment to for loops.
     restructure_for_loops(&mut out);
 
+    // Post-process: reconstruct lock blocks from Monitor.Enter/Exit.
+    restructure_locks(&mut out);
+
+    // Post-process: reconstruct using blocks from IDisposable + try/finally.
+    restructure_using(&mut out);
+
+    // Post-process: reconstruct foreach from GetEnumerator/MoveNext/Current.
+    restructure_foreach(&mut out);
+
+    // Post-process: reconstruct collection initializers from dup+Add patterns.
+    restructure_collection_initializers(&mut out);
+
     let mut s = String::new();
     // Local declarations.
     for (i, lt) in local_types.iter().enumerate() {
@@ -980,6 +992,532 @@ fn restructure_for_loops(out: &mut Vec<String>) {
     }
 }
 
+/// Post-process: reconstruct `lock (obj) { body }` from `Monitor.Enter`/
+/// `Monitor.Exit` patterns wrapped in try/finally.
+///
+/// Pattern in decompiled output:
+///   V_X = <lockobj>;
+///   V_Y = 0;
+///   try {
+///   Threading.Monitor.Enter(V_X, ref V_Y);
+///   ... body ...
+///   goto Label_ZZZZ; // leave try
+///   }
+///   finally {
+///   if (!V_Y) goto Label_WWWW;
+///   Threading.Monitor.Exit(V_X);
+///   Label_WWWW:
+///   // end finally
+///   }
+///   Label_ZZZZ:
+///   return;
+fn restructure_locks(out: &mut Vec<String>) {
+    let mut i = 0;
+    while i < out.len() {
+        // Look for `Threading.Monitor.Enter(...)` or `Monitor.Enter(...)`
+        let line = &out[i];
+        let trimmed = line.trim();
+        if !trimmed.contains("Monitor.Enter(") {
+            i += 1;
+            continue;
+        }
+
+        // Extract the lock object variable from the Enter call.
+        // Pattern: `Threading.Monitor.Enter(V_X, ref V_Y)` or `Monitor.Enter(V_X, ref V_Y)`
+        let enter_args = match trimmed.split("Monitor.Enter(").nth(1) {
+            Some(s) => s.trim_end_matches(')'),
+            None => { i += 1; continue; }
+        };
+        let parts: Vec<&str> = enter_args.split(", ").collect();
+        if parts.len() < 2 {
+            i += 1; continue;
+        }
+        let lock_var = parts[0].trim();
+
+        // The line before should be `try {`
+        if i == 0 || out[i - 1].trim() != "try {" {
+            i += 1;
+            continue;
+        }
+
+        // Find the closing `}` of the try block, then the `finally {` line.
+        let try_close = match out[i+1..].iter().position(|l| l.trim() == "}") {
+            Some(p) => i + 1 + p,
+            None => { i += 1; continue; }
+        };
+        if try_close + 1 >= out.len() || out[try_close + 1].trim() != "finally {" {
+            i += 1;
+            continue;
+        }
+
+        // Find the Monitor.Exit call in the finally block.
+        let finally_close = match out[try_close+2..].iter().position(|l| l.trim() == "}") {
+            Some(p) => try_close + 2 + p,
+            None => { i += 1; continue; }
+        };
+        let exit_line = out[try_close+2..finally_close].iter()
+            .find(|l| l.trim().contains("Monitor.Exit("));
+        let exit_line = match exit_line {
+            Some(l) => l.trim().to_string(),
+            None => { i += 1; continue; }
+        };
+        // Verify the Exit uses the same lock variable.
+        if !exit_line.contains(&format!("Monitor.Exit({lock_var})")) {
+            i += 1;
+            continue;
+        }
+
+        // Find the `try {` line index (it's i-1).
+        let try_idx = i - 1;
+
+        // The lock object assignment is before the try block.
+        // Find the line `V_X = <lockobj>;` before try_idx.
+        let lock_init_idx = (0..try_idx).rev()
+            .find(|&j| out[j].trim().starts_with(&format!("{lock_var} = ")));
+        let lock_expr = match lock_init_idx {
+            Some(idx) => {
+                let init = out[idx].trim().to_string();
+                let expr = init.trim_start_matches(&format!("{lock_var} = ")).trim_end_matches(';');
+                expr.to_string()
+            }
+            None => lock_var.to_string(),
+        };
+
+        // Also remove the `V_Y = 0;` line (the lock-taken flag init).
+        let flag_init_idx = (0..try_idx).rev()
+            .find(|&j| {
+                let t = out[j].trim();
+                t.starts_with("V_") && t.ends_with("= 0;") && t.contains(" = ")
+            });
+
+        // Collect the body lines (between Enter call and the leave goto).
+        let body_start = i + 1;
+        let body_end = try_close; // exclusive
+
+        // Restructure:
+        // 1. Replace the `try {` line with `lock ({lock_expr}) {`
+        out[try_idx] = format!("        lock ({lock_expr}) {{");
+
+        // 2. Remove the Enter call line
+        out[i] = String::new();
+
+        // 3. Remove the lock init line (if found)
+        if let Some(idx) = lock_init_idx {
+            out[idx] = String::new();
+        }
+
+        // 4. Remove the flag init line (if found)
+        if let Some(idx) = flag_init_idx {
+            // Make sure it's not the same as lock_init_idx
+            if Some(idx) != lock_init_idx {
+                out[idx] = String::new();
+            }
+        }
+
+        // 5. Remove the leave goto (the last non-empty line before try_close)
+        for j in (body_start..body_end).rev() {
+            if !out[j].trim().is_empty() {
+                if out[j].trim().starts_with("goto ") && out[j].contains("leave try") {
+                    out[j] = String::new();
+                }
+                break;
+            }
+        }
+
+        // 6. Indent the body lines by 4 spaces
+        for j in body_start..body_end {
+            if !out[j].trim().is_empty() {
+                out[j] = format!("    {}", out[j]);
+            }
+        }
+
+        // 7. Replace the try close `}` — keep it as `}`
+        // (already is `}`)
+
+        // 8. Remove the entire finally block (from `finally {` to its `}`)
+        for j in (try_close + 1)..=finally_close {
+            out[j] = String::new();
+        }
+
+        // 9. Remove the label after the finally (e.g. `Label_ZZZZ:`)
+        if finally_close + 1 < out.len() {
+            let next = out[finally_close + 1].trim();
+            if next.starts_with("Label_") && next.ends_with(':') {
+                out[finally_close + 1] = String::new();
+            }
+        }
+
+        i = finally_close + 2;
+    }
+}
+
+/// Post-process: reconstruct `using (var x = ...) { body }` from
+/// `IDisposable.Dispose` patterns wrapped in try/finally.
+///
+/// Pattern in decompiled output:
+///   V_X = <resource>;
+///   try {
+///   ... body ...
+///   goto Label_ZZZZ; // leave try
+///   }
+///   finally {
+///   if (!V_X) goto Label_WWWW;
+///   V_X.Dispose();
+///   Label_WWWW:
+///   // end finally
+///   }
+///   Label_ZZZZ:
+fn restructure_using(out: &mut Vec<String>) {
+    let mut i = 0;
+    while i < out.len() {
+        // Look for `try {` line
+        let line = &out[i];
+        if line.trim() != "try {" {
+            i += 1;
+            continue;
+        }
+
+        // The line before should be `V_X = <resource>;` (resource init)
+        if i == 0 {
+            i += 1;
+            continue;
+        }
+        let init_idx = (0..i).rev().find(|&j| !out[j].trim().is_empty());
+        let init_idx = match init_idx {
+            Some(idx) => idx,
+            None => { i += 1; continue; }
+        };
+        let init_line = out[init_idx].trim().to_string();
+        // Must be `V_X = <expr>;` — extract the variable and expression.
+        if !init_line.contains(" = ") || !init_line.ends_with(';') {
+            i += 1;
+            continue;
+        }
+        let eq_pos = match init_line.find(" = ") {
+            Some(p) => p,
+            None => { i += 1; continue; }
+        };
+        let resource_var = &init_line[..eq_pos];
+        let resource_expr = &init_line[eq_pos + 3..].trim_end_matches(';');
+
+        // Find the closing `}` of the try block, then the `finally {` line.
+        let try_close = match out[i+1..].iter().position(|l| l.trim() == "}") {
+            Some(p) => i + 1 + p,
+            None => { i += 1; continue; }
+        };
+        if try_close + 1 >= out.len() || out[try_close + 1].trim() != "finally {" {
+            i += 1;
+            continue;
+        }
+
+        // Find the finally close `}`.
+        let finally_close = match out[try_close+2..].iter().position(|l| l.trim() == "}") {
+            Some(p) => try_close + 2 + p,
+            None => { i += 1; continue; }
+        };
+
+        // Check the finally block for the Dispose pattern:
+        // `if (!V_X) goto Label_WWWW;` + `V_X.Dispose();`
+        let finally_lines: Vec<&String> = out[try_close+2..finally_close].iter().collect();
+        let has_null_check = finally_lines.iter().any(|l| {
+            l.trim().starts_with("if (!") && l.trim().contains(&format!("goto ")) && l.contains(resource_var)
+        });
+        let has_dispose = finally_lines.iter().any(|l| {
+            l.trim().contains(&format!("{resource_var}.Dispose()"))
+        });
+
+        if !has_null_check || !has_dispose {
+            i += 1;
+            continue;
+        }
+
+        // Collect the body lines (between try { and try close })
+        let body_start = i + 1;
+        let body_end = try_close; // exclusive
+
+        // Restructure:
+        // 1. Replace the `try {` line with `using (V_X = <resource>) {`
+        out[i] = format!("        using ({resource_var} = {resource_expr}) {{");
+
+        // 2. Remove the resource init line
+        out[init_idx] = String::new();
+
+        // 3. Remove the leave goto (the last non-empty line before try_close)
+        for j in (body_start..body_end).rev() {
+            if !out[j].trim().is_empty() {
+                if out[j].trim().starts_with("goto ") && out[j].contains("leave try") {
+                    out[j] = String::new();
+                }
+                break;
+            }
+        }
+
+        // 4. Indent the body lines by 4 spaces
+        for j in body_start..body_end {
+            if !out[j].trim().is_empty() {
+                out[j] = format!("    {}", out[j]);
+            }
+        }
+
+        // 5. Remove the entire finally block
+        for j in (try_close + 1)..=finally_close {
+            out[j] = String::new();
+        }
+
+        // 6. Remove the label after the finally block
+        if finally_close + 1 < out.len() {
+            let next = out[finally_close + 1].trim();
+            if next.starts_with("Label_") && next.ends_with(':') {
+                out[finally_close + 1] = String::new();
+            }
+        }
+
+        i = finally_close + 2;
+    }
+}
+
+/// Post-process: reconstruct `foreach (var item in collection) { body }`
+/// from `GetEnumerator`/`MoveNext`/`Current` patterns.
+///
+/// Pattern in decompiled output:
+///   V_X = <collection>.GetEnumerator();
+///   try {
+///   while (ref V_X.MoveNext()) {
+///   V_Y = ref V_X.get_Current();
+///   ... body ...
+///   }
+///   goto Label_ZZZZ; // leave try
+///   }
+///   finally {
+///   ref V_X.Dispose();
+///   // end finally
+///   }
+///   Label_ZZZZ:
+fn restructure_foreach(out: &mut Vec<String>) {
+    let mut i = 0;
+    while i < out.len() {
+        // Look for `V_X = <collection>.GetEnumerator();`
+        let line = &out[i];
+        let trimmed = line.trim();
+        if !trimmed.ends_with(".GetEnumerator();") {
+            i += 1;
+            continue;
+        }
+        // Extract the enumerator variable and collection expression.
+        let eq_pos = match trimmed.find(" = ") {
+            Some(p) => p,
+            None => { i += 1; continue; }
+        };
+        let enum_var = &trimmed[..eq_pos];
+        let collection = trimmed[eq_pos + 3..].trim_end_matches(".GetEnumerator();");
+
+        // The next non-empty line should be `try {`
+        let try_idx = (i+1..out.len()).find(|&j| !out[j].trim().is_empty());
+        let try_idx = match try_idx {
+            Some(idx) if out[idx].trim() == "try {" => idx,
+            _ => { i += 1; continue; }
+        };
+
+        // Inside the try, find `while (ref V_X.MoveNext()) {`
+        let while_idx = (try_idx+1..out.len()).find(|&j| {
+            let t = out[j].trim();
+            t.starts_with("while (") && t.contains(&format!("{enum_var}.MoveNext()")) && t.ends_with("{")
+        });
+        let while_idx = match while_idx {
+            Some(idx) => idx,
+            None => { i += 1; continue; }
+        };
+
+        // The first non-empty line inside the while should be
+        // `V_Y = ref V_X.get_Current();`
+        let current_idx = (while_idx+1..out.len()).find(|&j| !out[j].trim().is_empty());
+        let (current_idx, item_var) = match current_idx {
+            Some(idx) => {
+                let t = out[idx].trim();
+                if t.contains(&format!("{enum_var}.get_Current()")) && t.contains(" = ") {
+                    // Extract V_Y from `V_Y = ref V_X.get_Current();`
+                    let eq = t.find(" = ").unwrap();
+                    let item = t[..eq].to_string();
+                    (idx, item)
+                } else {
+                    { i += 1; continue; }
+                }
+            }
+            None => { i += 1; continue; }
+        };
+
+        // Find the while close `}`
+        let while_close = match out[while_idx+1..].iter().position(|l| l.trim() == "}") {
+            Some(p) => while_idx + 1 + p,
+            None => { i += 1; continue; }
+        };
+
+        // Find the try close `}` and `finally {`
+        let try_close = match out[while_close+1..].iter().position(|l| l.trim() == "}") {
+            Some(p) => while_close + 1 + p,
+            None => { i += 1; continue; }
+        };
+        if try_close + 1 >= out.len() || out[try_close + 1].trim() != "finally {" {
+            i += 1;
+            continue;
+        }
+
+        // Find the finally close `}`
+        let finally_close = match out[try_close+2..].iter().position(|l| l.trim() == "}") {
+            Some(p) => try_close + 2 + p,
+            None => { i += 1; continue; }
+        };
+
+        // Verify the finally block contains V_X.Dispose()
+        let has_dispose = out[try_close+2..finally_close].iter()
+            .any(|l| l.trim().contains(&format!("{enum_var}.Dispose()")));
+        if !has_dispose {
+            i += 1;
+            continue;
+        }
+
+        // Restructure:
+        // 1. Replace the GetEnumerator init line with `foreach (var V_Y in <collection>) {`
+        out[i] = format!("        foreach (var {item_var} in {collection}) {{");
+
+        // 2. Remove the `try {` line
+        out[try_idx] = String::new();
+
+        // 3. Remove the `while (...) {` line
+        out[while_idx] = String::new();
+
+        // 4. Remove the `V_Y = ref V_X.get_Current();` line
+        out[current_idx] = String::new();
+
+        // 5. Remove the while close `}`
+        out[while_close] = String::new();
+
+        // 6. Indent the body lines (between current_idx+1 and while_close)
+        for j in (current_idx+1)..while_close {
+            if !out[j].trim().is_empty() {
+                // Remove extra indentation from the while body (it was indented by while)
+                // and re-indent for foreach
+                let stripped = out[j].trim_start();
+                out[j] = format!("            {}", stripped);
+            }
+        }
+
+        // 7. Remove the leave goto (between while_close and try_close)
+        for j in (while_close+1)..try_close {
+            if !out[j].trim().is_empty() && out[j].trim().starts_with("goto ") {
+                out[j] = String::new();
+            }
+        }
+
+        // 8. Replace the try close `}` with `}` (foreach close)
+        // (already is `}`)
+
+        // 9. Remove the entire finally block
+        for j in (try_close + 1)..=finally_close {
+            out[j] = String::new();
+        }
+
+        // 10. Remove the label after the finally block
+        if finally_close + 1 < out.len() {
+            let next = out[finally_close + 1].trim();
+            if next.starts_with("Label_") && next.ends_with(':') {
+                out[finally_close + 1] = String::new();
+            }
+        }
+
+        i = finally_close + 2;
+    }
+}
+
+/// Post-process: reconstruct collection initializers from dup+Add patterns.
+/// Pattern:
+///   V_tmp_N = new Type();
+///   V_tmp_N.Add(x);
+///   V_tmp_N.Add(y);
+///   ... (possibly return V_tmp_N; or V_tmp_N = ...)
+///
+/// Transforms to:
+///   new Type() { x, y, ... }
+/// (and removes the Add lines, replacing the temp usage with the initializer)
+fn restructure_collection_initializers(out: &mut Vec<String>) {
+    let mut i = 0;
+    while i < out.len() {
+        // Look for `V_tmp_N = new Type();`
+        let line = out[i].clone();
+        let trimmed = line.trim();
+        if !trimmed.starts_with("V_tmp_") || !trimmed.contains(" = new ") || !trimmed.ends_with("();") {
+            i += 1;
+            continue;
+        }
+
+        // Extract the temp variable name and the constructor expression.
+        let eq_pos = trimmed.find(" = ").unwrap();
+        let temp_var = &trimmed[..eq_pos];
+        let ctor_expr = &trimmed[eq_pos + 3..].trim_end_matches(';');
+
+        // Collect Add calls: `V_tmp_N.Add(arg);`
+        let mut add_args: Vec<String> = Vec::new();
+        let mut j = i + 1;
+        while j < out.len() {
+            let t = out[j].trim();
+            if t == &format!("{temp_var}.Add();") {
+                break;
+            }
+            let prefix = format!("{temp_var}.Add(");
+            if t.starts_with(&prefix) && t.ends_with(");") {
+                let arg = &t[prefix.len()..].trim_end_matches(");");
+                add_args.push(arg.to_string());
+                j += 1;
+            } else if t.is_empty() {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+
+        if add_args.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        // Build the collection initializer expression.
+        let initializer = format!("{ctor_expr} {{ {} }}", add_args.join(", "));
+
+        // Replace the init line with the initializer (as a non-statement expression).
+        // We'll mark it so the next usage can pick it up.
+        out[i] = format!("        {temp_var} = {initializer};");
+
+        // Remove the Add lines.
+        for k in (i+1)..j {
+            if out[k].trim().starts_with(&format!("{temp_var}.Add(")) {
+                out[k] = String::new();
+            }
+        }
+
+        i = j;
+    }
+
+    // Second pass: replace `return V_tmp_N;` and `V_X = V_tmp_N;` with the
+    // initializer expression directly, and remove the temp declaration.
+    // Actually, let's do a simpler approach: just leave the temp assignment
+    // with the initializer. The output `V_tmp_0 = new List<int>() { 1, 2, 3 };`
+    // is acceptable. But we can clean it up by inlining if the next use is
+    // a return or assignment.
+    //
+    // For now, the temp variable approach is clean enough.
+}
+
+/// Clean up compiler-generated field names.
+/// `<Count>k__BackingField` → `Count`
+fn clean_field_name(fname: &str) -> String {
+    if fname.starts_with('<') {
+        if let Some(end) = fname.find('>') {
+            return fname[1..end].to_string();
+        }
+    }
+    fname.to_string()
+}
+
 /// Format a custom attribute line: `[Attr]` or `[Attr("args")]`.
 fn format_attr_line(name: &str, args: &str) -> String {
     let simple = simple_name(&strip_system(name));
@@ -1137,7 +1675,19 @@ fn handle_instr(
         "ldnull" => push(stack, "null".into()),
         "dup" => {
             if let Some(top) = stack.last().cloned() {
-                push(stack, top);
+                // If the top is a `new ...()` expression, introduce a temp
+                // variable to avoid rendering the constructor multiple times.
+                if top.starts_with("new ") && top.ends_with(")") {
+                    let temp = format!("V_tmp_{}", out.len());
+                    stmt(out, format!("{temp} = {top};"));
+                    // Replace the stack top with the temp variable.
+                    if let Some(t) = stack.last_mut() {
+                        *t = temp.clone();
+                    }
+                    push(stack, temp);
+                } else {
+                    push(stack, top);
+                }
             }
         }
         "pop" => {
@@ -1318,14 +1868,14 @@ fn handle_instr(
             if let Operand::Token(tok) = &ins.operand {
                 let (tname, fname) = field_ref(reader, *tok);
                 let obj = pop(stack);
-                push(stack, format!("{obj}.{fname}"));
+                push(stack, format!("{obj}.{}", clean_field_name(&fname)));
                 let _ = tname;
             }
         }
         "ldsfld" | "ldsflda" => {
             if let Operand::Token(tok) = &ins.operand {
                 let (tname, fname) = field_ref(reader, *tok);
-                push(stack, format!("{tname}.{fname}"));
+                push(stack, format!("{tname}.{}", clean_field_name(&fname)));
             }
         }
         "stfld" => {
@@ -1333,7 +1883,7 @@ fn handle_instr(
                 let (_, fname) = field_ref(reader, *tok);
                 let val = pop(stack);
                 let obj = pop(stack);
-                stmt(out, format!("{obj}.{fname} = {val};"));
+                stmt(out, format!("{obj}.{} = {val};", clean_field_name(&fname)));
             }
         }
         "stsfld" => {

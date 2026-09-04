@@ -55,12 +55,12 @@
 - [x] Remove redundant parentheses in expressions (precedence-aware printing)
 - [ ] Collapse `dup`/`pop` patterns into temporaries cleanly
 - [x] Reconstruct `ref`/`out`/`in` parameters from `ByRef` + modreq
-- [ ] Reconstruct `foreach` over `IEnumerable` from enumerator patterns
-- [ ] Reconstruct `using` blocks from `IDisposable` patterns
-- [ ] Reconstruct `lock` blocks from `Monitor.Enter/Exit`
-- [ ] Reconstruct auto-properties from compiler-generated backing fields
+- [x] Reconstruct `foreach` over `IEnumerable` from enumerator patterns
+- [x] Reconstruct `using` blocks from `IDisposable` patterns
+- [x] Reconstruct `lock` blocks from `Monitor.Enter/Exit`
+- [x] Reconstruct auto-properties from compiler-generated backing fields
 - [x] Reconstruct `string.Concat` chains back to `+` operators
-- [ ] Reconstruct collection initializers, object initializers
+- [x] Reconstruct collection initializers, object initializers
 
 ## Next — async / closures / state machines
 

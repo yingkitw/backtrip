@@ -258,6 +258,102 @@ fn decompiles_string_concat() {
 }
 
 #[test]
+fn decompiles_auto_properties() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // Auto-properties should render with get/set accessors.
+    assert!(calc.source.contains("public string ReadOnly { get; }"),
+        "read-only auto-property missing;\n{}", calc.source);
+    assert!(calc.source.contains("public int Count { get; set; }"),
+        "read-write auto-property missing;\n{}", calc.source);
+    // Backing field names should NOT appear in the output.
+    assert!(!calc.source.contains("k__BackingField"),
+        "backing field name should be cleaned;\n{}", calc.source);
+    // Constructor should reference the property name, not the backing field.
+    assert!(calc.source.contains("this.Count = 42;"),
+        "constructor should use property name;\n{}", calc.source);
+    assert!(calc.source.contains("this.ReadOnly = \"default\";"),
+        "constructor should use property name for read-only;\n{}", calc.source);
+}
+
+#[test]
+fn decompiles_lock_block() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // lock: should render `lock (this._sync) {`
+    assert!(calc.source.contains("lock (this._sync) {"),
+        "lock block missing;\n{}", calc.source);
+    // Must not render as Monitor.Enter/Monitor.Exit.
+    assert!(!calc.source.contains("Monitor.Enter("),
+        "should use lock, not Monitor.Enter;\n{}", calc.source);
+    assert!(!calc.source.contains("Monitor.Exit("),
+        "should use lock, not Monitor.Exit;\n{}", calc.source);
+}
+
+#[test]
+fn decompiles_using_block() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // using: should render `using (V_0 = new IO.StreamReader(path)) {`
+    assert!(calc.source.contains("using (V_0 = new IO.StreamReader(path)) {"),
+        "using block missing;\n{}", calc.source);
+    // Must not render as Dispose() in a finally block.
+    assert!(!calc.source.contains(".Dispose()"),
+        "should use using, not Dispose;\n{}", calc.source);
+}
+
+#[test]
+fn decompiles_foreach() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // foreach: should render `foreach (var V_2 in numbers) {`
+    assert!(calc.source.contains("foreach (var V_2 in numbers) {"),
+        "foreach block missing;\n{}", calc.source);
+    // Must not render as GetEnumerator/MoveNext/get_Current.
+    assert!(!calc.source.contains("GetEnumerator()"),
+        "should use foreach, not GetEnumerator;\n{}", calc.source);
+    assert!(!calc.source.contains("MoveNext()"),
+        "should use foreach, not MoveNext;\n{}", calc.source);
+}
+
+#[test]
+fn decompiles_collection_initializer() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // collection initializer: should render `new ...() { 1, 2, 3 }`
+    assert!(calc.source.contains("{ 1, 2, 3 }"),
+        "collection initializer missing;\n{}", calc.source);
+    // Must not render as separate Add() calls.
+    assert!(!calc.source.contains(".Add(1);"),
+        "should use initializer, not Add;\n{}", calc.source);
+}
+
+#[test]
 fn decompiles_struct_point() {
     let (_pe, root, tables) = load_reader();
     let reader = Reader::new(&_pe, &root, &tables).unwrap();
