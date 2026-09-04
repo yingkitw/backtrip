@@ -274,7 +274,7 @@ pub fn parse_field_sig(blob: &[u8]) -> Result<Type> {
 }
 
 /// Parse a property signature (ECMA-335 II.23.2.5).
-/// Layout: 0x08 [HASTHIS] ParamCount Type Params...
+/// Layout: 0x08 \[HASTHIS\] ParamCount Type Params...
 /// Returns the property type.
 pub fn parse_property_sig(blob: &[u8]) -> Result<Type> {
     let mut c = Cursor::new(blob);
