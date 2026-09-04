@@ -272,3 +272,16 @@ pub fn parse_field_sig(blob: &[u8]) -> Result<Type> {
     }
     read_type(&mut c)
 }
+
+/// Parse a property signature (ECMA-335 II.23.2.5).
+/// Layout: 0x08 [HASTHIS] ParamCount Type Params...
+/// Returns the property type.
+pub fn parse_property_sig(blob: &[u8]) -> Result<Type> {
+    let mut c = Cursor::new(blob);
+    let tag = c.read_u8()?;
+    if tag & 0x0F != 0x08 {
+        return Err(Error::InvalidSignature(format!("property sig tag {tag:#x} != 0x08")));
+    }
+    let _param_count = c.read_uint()?;
+    read_type(&mut c)
+}

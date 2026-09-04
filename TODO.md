@@ -24,6 +24,9 @@
 - [x] Better IL disassembly: resolve `ldstr` to the literal, locals names
 - [x] `enum` underlying values (Constant table + Field defaults)
 - [x] Nested types (NestedClass table → nested class output)
+- [x] Static constants / `const` fields (Literal flag + Constant table)
+- [x] Delegate types (`MulticastDelegate` base → `delegate` declaration)
+- [x] Properties (PropertyMap / Property / MethodSemantics → getter/setter)
 
 ## Next — control flow
 
@@ -35,13 +38,10 @@
 
 ## Next — language features
 
-- [ ] Properties (PropertyMap / Property / MethodSemantics → getter/setter)
 - [ ] Events (EventMap / Event / MethodSemantics → add/remove/raise)
 - [ ] Custom attributes (CustomAttribute table → `[Attr(...)]`)
-- [ ] Delegate types (`MulticastDelegate` base → `delegate` declaration)
 - [ ] Explicit interface implementations (MethodImpl)
 - [ ] P/Invoke (ImplMap / ModuleRef → `extern`)
-- [ ] Static constants / `const` fields (Literal flag + Constant table)
 - [ ] Default parameter values
 - [ ] `params` / `vararg` calling conventions
 

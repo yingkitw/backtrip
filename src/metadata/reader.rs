@@ -161,6 +161,59 @@ impl<'a> Reader<'a> {
         None
     }
 
+    // ---- Properties ----
+
+    /// Returns property info for a type: (name, type, getter_method_row, setter_method_row).
+    /// Method rows are 0-based indices into the METHODDEF table.
+    pub fn properties_for_type(&self, type_row: u32) -> Vec<(String, Type, Option<usize>, Option<usize>)> {
+        let mut out = Vec::new();
+        // Find PropertyMap rows for this type.
+        let mut prop_start = 0u32;
+        let mut prop_end = 0u32;
+        for (i, r) in self.tables.get(tbl::PROPERTYMAP).iter().enumerate() {
+            if r.col(0) == type_row {
+                prop_start = r.col(1);
+                let next = self.tables.get(tbl::PROPERTYMAP).get(i + 1)
+                    .map(|r| r.col(1))
+                    .unwrap_or_else(|| self.tables.row_count(tbl::PROPERTY) + 1);
+                prop_end = next;
+                break;
+            }
+        }
+        if prop_start == 0 && prop_end == 0 {
+            return out;
+        }
+        // For each Property row in range, find getter/setter via MethodSemantics.
+        for prop_row in prop_start..prop_end {
+            let prop = match self.tables.get(tbl::PROPERTY).get(prop_row as usize - 1) {
+                Some(r) => r,
+                None => continue,
+            };
+            let name = self.string(prop.col(1));
+            let ptype = match crate::metadata::signatures::parse_property_sig(self.blob(prop.col(2))) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let mut getter: Option<usize> = None;
+            let mut setter: Option<usize> = None;
+            for ms in self.tables.get(tbl::METHODSEMANTICS) {
+                let parent = decode_coded(Coded::HasSemantics, ms.col(2));
+                if parent.table == Some(tbl::PROPERTY) && parent.row == prop_row {
+                    let sem = ms.col(0) as u16;
+                    let method_row = ms.col(1) as usize - 1; // 0-based index into METHODDEF
+                    if sem & 0x0002 != 0 {
+                        getter = Some(method_row);
+                    }
+                    if sem & 0x0001 != 0 {
+                        setter = Some(method_row);
+                    }
+                }
+            }
+            out.push((name, ptype, getter, setter));
+        }
+        out
+    }
+
     // ---- Resolution helpers ----
     pub fn type_def_or_ref_name(&self, ci: CodedIndex) -> String {
         match ci.table {

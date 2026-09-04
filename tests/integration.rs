@@ -53,6 +53,12 @@ fn decompiles_calculator_add_body() {
     assert!(calc.source.contains("return (a + b);"));
     assert!(calc.source.contains("public static int Square(int x)"));
     assert!(calc.source.contains("return (x * x);"));
+    // const field: Literal flag + Constant table value.
+    assert!(calc.source.contains("public const int MaxValue = 100;"));
+    // Property: auto-property rendered as { get; set; }, not get_/set_ methods.
+    assert!(calc.source.contains("public string Label { get; set; }"));
+    assert!(!calc.source.contains("get_Label"), "getter method should be skipped");
+    assert!(!calc.source.contains("set_Label"), "setter method should be skipped");
 }
 
 #[test]
@@ -115,6 +121,22 @@ fn decompiles_nested_type_inside_parent() {
     assert!(calc.source.contains("class Settings"), "nested Settings class missing;\n{}", calc.source);
     assert!(calc.source.contains("public Settings(string label)"), "nested Settings ctor missing");
     assert!(calc.source.contains("this.Enabled = 1"), "nested Settings ctor body missing");
+}
+
+#[test]
+fn decompiles_delegate() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let notify = types
+        .iter()
+        .find(|t| t.file_name.contains("Notify"))
+        .expect("Notify delegate file");
+    assert!(notify.source.contains("public delegate void Notify(string message);"),
+        "delegate not rendered correctly;\n{}", notify.source);
+    // Must not render as a class with MulticastDelegate base.
+    assert!(!notify.source.contains("MulticastDelegate"));
+    assert!(!notify.source.contains("Invoke"));
 }
 
 #[test]

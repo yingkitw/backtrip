@@ -89,6 +89,7 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
     let base_simple = strip_system(&base_full);
     let is_struct = base_simple == "ValueType";
     let is_enum = base_simple == "Enum";
+    let is_delegate = base_simple == "MulticastDelegate";
     let kind = if is_interface {
         "interface"
     } else if is_enum {
@@ -115,13 +116,40 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
     if !access.is_empty() {
         keywords.push(access.to_string());
     }
-    if is_abstract && !is_interface && !is_struct {
+    if is_abstract && !is_interface && !is_struct && !is_delegate {
         keywords.push("abstract".into());
     }
-    if is_sealed && !is_interface && !is_struct && !is_enum {
+    if is_sealed && !is_interface && !is_struct && !is_enum && !is_delegate {
         keywords.push("sealed".into());
     }
     keywords.push(kind.to_string());
+
+    // Delegates: render as `delegate {ret} {Name}({params});` using the
+    // Invoke method's signature. No body, no base type, no fields.
+    if is_delegate {
+        let method_range = reader.type_method_rows(row_idx);
+        let invoke = method_range.clone().find_map(|mi| {
+            let m = &reader.tables.get(tbl::METHODDEF)[mi];
+            if reader.method_name(m) == "Invoke" {
+                reader.method_sig(m).ok().map(|sig| (sig, mi))
+            } else {
+                None
+            }
+        });
+        if let Some((sig, mi)) = invoke {
+            let ret_type = reader.type_name(&sig.ret_type);
+            let param_names = method_param_names(reader, (mi + 1) as u32, &sig, false);
+            let params: Vec<String> = sig.param_types.iter().enumerate().map(|(i, t)| {
+                let pname = param_names.get(i).cloned().unwrap_or_else(|| format!("arg{i}"));
+                format!("{} {}", reader.type_name(t), pname)
+            }).collect();
+            s.push_str(&format!("{} delegate {} {}{}({});\n",
+                access, ret_type, name, generic_decl, params.join(", ")));
+            return Ok(s);
+        }
+        // Fallback: if no Invoke method found, fall through to class rendering.
+    }
+
     s.push_str(&format!("{} {}{}", keywords.join(" "), name, generic_decl));
 
     // Base type / interfaces.
@@ -187,15 +215,52 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
         }
         let fflags = reader.field_flags(f);
         let ftype = reader.field_type(f).map(|t| reader.type_name(&t)).unwrap_or_else(|_| "object".into());
-        s.push_str(&format!("    {} {} {};\n", field_access(fflags), ftype, fname));
+        // Literal + Static flags => C# `const` with a value from the Constant table.
+        if fflags & 0x0040 != 0 {
+            let value = reader
+                .constant_for_field(fi as u32 + 1)
+                .map(|(tc, blob)| format_constant(tc, blob))
+                .unwrap_or_else(|| "default".into());
+            s.push_str(&format!("    {} const {} {} = {};\n", field_access(fflags), ftype, fname, value));
+        } else {
+            s.push_str(&format!("    {} {} {};\n", field_access(fflags), ftype, fname));
+        }
     }
     if has_fields {
         s.push('\n');
     }
 
-    // Methods.
+    // Properties.
+    let properties = reader.properties_for_type(row_idx);
+    // Collect property method rows (getter/setter) to skip in the method loop.
+    let mut property_methods: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (pname, ptype, getter, setter) in &properties {
+        if let Some(g) = getter { property_methods.insert(*g); }
+        if let Some(s) = setter { property_methods.insert(*s); }
+        let access_str = if let Some(g) = getter {
+            // Use the getter's access modifier.
+            let m = &reader.tables.get(tbl::METHODDEF)[*g];
+            method_access(reader.method_flags(m))
+        } else {
+            "public"
+        };
+        let type_str = reader.type_name(ptype);
+        let mut accessors: Vec<&str> = Vec::new();
+        if getter.is_some() { accessors.push("get"); }
+        if setter.is_some() { accessors.push("set"); }
+        s.push_str(&format!("    {} {} {} {{ {} }}\n", access_str, type_str, pname, accessors.join("; ") + ";"));
+        let _ = pname;
+    }
+    if !properties.is_empty() {
+        s.push('\n');
+    }
+
+    // Methods (skip property getter/setter methods).
     let method_range = reader.type_method_rows(row_idx);
     for mi in method_range {
+        if property_methods.contains(&mi) {
+            continue;
+        }
         let m = &reader.tables.get(tbl::METHODDEF)[mi];
         let src = decompile_method(reader, m, (mi + 1) as u32, &name)?;
         s.push_str(&src);

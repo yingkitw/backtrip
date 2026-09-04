@@ -5,6 +5,8 @@ namespace Shapes
     public class Calculator
     {
         public int Value;
+        public const int MaxValue = 100;
+        public string Label { get; set; }
 
         public Calculator(int value)
         {
@@ -73,4 +75,6 @@ namespace Shapes
         Green = 1,
         Blue = 2
     }
+
+    public delegate void Notify(string message);
 }
