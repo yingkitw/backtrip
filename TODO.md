@@ -1,4 +1,4 @@
-# roundtrip — TODO
+# backtrip — TODO
 
 ## Done
 
@@ -84,10 +84,10 @@
 Compared to ILSpy / dnSpy / ILRepack / dotPeek / JetBrains dotPeek:
 
 - ILSpy has high-quality C# reconstruction, decompilation of all C# features,
-  and a tree UI. roundtrip should target the same output quality over time.
+  and a tree UI. backtrip should target the same output quality over time.
 - dnSpy has a debugger. Out of scope for a CLI decompiler, but a `--watch`
   mode could be interesting.
-- Iced (C# library) is a strong IL parser; roundtrip's Rust IL parser is
+- Iced (C# library) is a strong IL parser; backtrip's Rust IL parser is
   comparable in coverage. Iced adds a full IL assembler — consider a
   round-trip assembler later.
 - [x] Add a `--json` output mode for machine consumption (type/method/field model).

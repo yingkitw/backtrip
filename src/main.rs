@@ -1,10 +1,10 @@
 use clap::Parser;
 use std::path::PathBuf;
-use roundtrip::{cil, decompile, error, metadata, output, pe};
+use backtrip::{cil, decompile, error, metadata, output, pe};
 
-/// roundtrip - a .NET decompiler written in Rust.
+/// backtrip - a .NET decompiler written in Rust.
 #[derive(Parser, Debug)]
-#[command(name = "roundtrip", version, about)]
+#[command(name = "backtrip", version, about)]
 struct Cli {
     /// Path to the .NET assembly (.dll / .exe) to decompile, or a directory
     /// when --recursive is used.

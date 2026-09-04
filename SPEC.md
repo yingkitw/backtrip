@@ -1,4 +1,4 @@
-# roundtrip — Specification
+# backtrip — Specification
 
 ## Purpose
 
@@ -13,7 +13,7 @@ A single PE file (`.dll` or `.exe`) containing a .NET CLI runtime header
 ## CLI
 
 ```
-roundtrip <ASSEMBLY> [-o <DIR>] [--il] [--list] [--type <NAME>] [--stdout]
+backtrip <ASSEMBLY> [-o <DIR>] [--il] [--list] [--type <NAME>] [--stdout]
 ```
 
 - Default action: decompile to C#, one `.cs` file per type, written to the

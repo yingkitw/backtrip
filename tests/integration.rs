@@ -1,15 +1,15 @@
 use std::path::PathBuf;
 
-use roundtrip::decompile::{decompile_assembly, decompile_type_by_name};
-use roundtrip::metadata::{load, Reader};
-use roundtrip::pe::PeImage;
+use backtrip::decompile::{decompile_assembly, decompile_type_by_name};
+use backtrip::metadata::{load, Reader};
+use backtrip::pe::PeImage;
 
 fn sample_dll() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/bin/Release/net8.0/Sample.dll")
 }
 
-fn load_reader() -> (PeImage, roundtrip::metadata::streams::MetadataRoot, roundtrip::metadata::tables::Tables) {
+fn load_reader() -> (PeImage, backtrip::metadata::streams::MetadataRoot, backtrip::metadata::tables::Tables) {
     let data = std::fs::read(sample_dll()).expect("read sample dll");
     let pe = PeImage::parse(data).expect("parse PE");
     let (root, tables) = load(&pe).expect("load metadata");
@@ -22,14 +22,14 @@ fn parses_pe_and_metadata() {
     let cli = pe.cli_header().unwrap();
     assert!(cli.metadata_size > 0);
     // Assembly table should have exactly 1 row.
-    assert_eq!(tables.row_count(roundtrip::metadata::tbl::ASSEMBLY), 1);
+    assert_eq!(tables.row_count(backtrip::metadata::tbl::ASSEMBLY), 1);
 }
 
 #[test]
 fn lists_expected_types() {
     let (_pe, root, tables) = load_reader();
     let reader = Reader::new(&_pe, &root, &tables).unwrap();
-    let type_defs = reader.tables.get(roundtrip::metadata::tbl::TYPEDEF);
+    let type_defs = reader.tables.get(backtrip::metadata::tbl::TYPEDEF);
     let names: Vec<String> = type_defs
         .iter()
         .map(|r| reader.type_def_name(r))
@@ -561,10 +561,10 @@ fn decompiles_constructor() {
 }
 
 #[test]
-fn cil_decoder_roundtrip_sizes() {
+fn cil_decoder_round_trip_sizes() {
     // A tiny method body: ldarg.1, ldarg.2, add, ret.
     let code = [0x03_u8, 0x04, 0x58, 0x2A];
-    let instrs = roundtrip::cil::decode(&code).unwrap();
+    let instrs = backtrip::cil::decode(&code).unwrap();
     assert_eq!(instrs.len(), 4);
     assert_eq!(instrs[0].name, "ldarg.1");
     assert_eq!(instrs[2].name, "add");
@@ -578,7 +578,7 @@ fn cil_decoder_roundtrip_sizes() {
 fn cil_decoder_ldc_and_branch() {
     // ldc.i4.s 42, brtrue.s +0, ret
     let code = [0x1F_u8, 42, 0x2D, 0x00, 0x2A];
-    let instrs = roundtrip::cil::decode(&code).unwrap();
+    let instrs = backtrip::cil::decode(&code).unwrap();
     assert_eq!(instrs[0].name, "ldc.i4.s");
     assert_eq!(instrs[1].name, "brtrue.s");
     assert_eq!(instrs[2].name, "ret");
@@ -618,7 +618,7 @@ fn decompile_single_type_not_found() {
 
 #[test]
 fn compressed_uint_decoding() {
-    use roundtrip::metadata::streams::decode_compressed_uint;
+    use backtrip::metadata::streams::decode_compressed_uint;
     assert_eq!(decode_compressed_uint(&[0x05]).unwrap(), (5, 1));
     assert_eq!(decode_compressed_uint(&[0x80, 0x05]).unwrap(), (5, 2));
     assert_eq!(decode_compressed_uint(&[0xC0, 0x00, 0x01, 0x00]).unwrap(), (256, 4));
@@ -626,19 +626,19 @@ fn compressed_uint_decoding() {
 
 // ---- CLI smoke tests (shell out to the built binary) ----
 
-fn roundtrip_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_roundtrip"))
+fn backtrip_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_backtrip"))
 }
 
 #[test]
 fn cli_stdout_prints_single_type() {
-    let out = std::process::Command::new(roundtrip_bin())
+    let out = std::process::Command::new(backtrip_bin())
         .arg(sample_dll())
         .arg("--type")
         .arg("Calculator")
         .arg("--stdout")
         .output()
-        .expect("run roundtrip");
+        .expect("run backtrip");
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("public class Calculator"));
@@ -648,11 +648,11 @@ fn cli_stdout_prints_single_type() {
 
 #[test]
 fn cli_stdout_requires_type() {
-    let out = std::process::Command::new(roundtrip_bin())
+    let out = std::process::Command::new(backtrip_bin())
         .arg(sample_dll())
         .arg("--stdout")
         .output()
-        .expect("run roundtrip");
+        .expect("run backtrip");
     assert!(!out.status.success(), "--stdout without --type should fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("--stdout requires --type"));
@@ -660,14 +660,14 @@ fn cli_stdout_requires_type() {
 
 #[test]
 fn il_disasm_resolves_ldstr_and_locals() {
-    let out = std::process::Command::new(roundtrip_bin())
+    let out = std::process::Command::new(backtrip_bin())
         .arg(sample_dll())
         .arg("--il")
         .arg("--type")
         .arg("Calculator")
         .arg("--stdout")
         .output()
-        .expect("run roundtrip");
+        .expect("run backtrip");
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let il = String::from_utf8_lossy(&out.stdout);
     // ldstr should resolve to the literal string, not a raw token.
@@ -681,17 +681,17 @@ fn il_disasm_resolves_ldstr_and_locals() {
 fn cli_recursive_decompiles_directory() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/bin/Release/net8.0");
-    let out_dir = std::env::temp_dir().join("roundtrip_recursive_test");
+    let out_dir = std::env::temp_dir().join("backtrip_recursive_test");
     // Clean up any previous run.
     let _ = std::fs::remove_dir_all(&out_dir);
 
-    let out = std::process::Command::new(roundtrip_bin())
+    let out = std::process::Command::new(backtrip_bin())
         .arg(&dir)
         .arg("--recursive")
         .arg("-o")
         .arg(&out_dir)
         .output()
-        .expect("run roundtrip");
+        .expect("run backtrip");
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("Decompiled 1 assemblies"),
@@ -711,11 +711,11 @@ fn cli_recursive_decompiles_directory() {
 
 #[test]
 fn cli_json_outputs_valid_model() {
-    let out = std::process::Command::new(roundtrip_bin())
+    let out = std::process::Command::new(backtrip_bin())
         .arg(sample_dll())
         .arg("--json")
         .output()
-        .expect("run roundtrip");
+        .expect("run backtrip");
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let json = String::from_utf8_lossy(&out.stdout);
     // Should be valid JSON (parse with python).
@@ -741,11 +741,11 @@ fn cli_json_outputs_valid_model() {
 
 #[test]
 fn cli_detect_obfuscation_clean_assembly() {
-    let out = std::process::Command::new(roundtrip_bin())
+    let out = std::process::Command::new(backtrip_bin())
         .arg(sample_dll())
         .arg("--detect-obfuscation")
         .output()
-        .expect("run roundtrip");
+        .expect("run backtrip");
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let report = String::from_utf8_lossy(&out.stdout);
     // Clean assembly should report no obfuscation indicators.
@@ -760,11 +760,11 @@ fn cli_detect_obfuscation_clean_assembly() {
 
 #[test]
 fn cli_verify_clean_assembly() {
-    let out = std::process::Command::new(roundtrip_bin())
+    let out = std::process::Command::new(backtrip_bin())
         .arg(sample_dll())
         .arg("--verify")
         .output()
-        .expect("run roundtrip");
+        .expect("run backtrip");
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let report = String::from_utf8_lossy(&out.stdout);
     // Should have a verification report header.

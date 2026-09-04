@@ -1,8 +1,8 @@
-# roundtrip — Architecture
+# backtrip — Architecture
 
 ## Overview
 
-roundtrip is a pipeline: PE bytes → metadata → CIL → C# (or IL). Each stage is
+backtrip is a pipeline: PE bytes → metadata → CIL → C# (or IL). Each stage is
 a module with a clear boundary; data flows downward and is immutable once
 parsed.
 

@@ -1,9 +1,25 @@
 [package]
-name = "roundtrip"
+name = "backtrip"
 version = "0.1.0"
 edition = "2024"
-description = "A .NET decompiler written in Rust"
-license = "MIT"
+description = "A .NET IL decompiler and CIL disassembler written in Rust — converts .NET assemblies (.dll/.exe) back to readable C# source code or IL disassembly"
+license = "Apache-2.0"
+keywords = [
+    "decompiler",
+    "dotnet",
+    "cil",
+    "il",
+    "csharp"
+]
+categories = [
+    "command-line-utilities",
+    "development-tools",
+    "parser-implementations",
+]
+repository = "https://github.com/yingkitw/backtrip"
+homepage = "https://github.com/yingkitw/backtrip"
+documentation = "https://docs.rs/backtrip"
+readme = "README.md"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
