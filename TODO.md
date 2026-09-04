@@ -70,7 +70,8 @@
 - [ ] `yield` iterator state-machine reversal
 - [x] `is` patterns and `as` operator rendering (isinst/castclass cleanup)
 - [x] `switch` statement reconstruction (inlined case bodies + default)
-- [ ] `switch` expressions, pattern matching
+- [x] `switch` expressions (goto+assign pattern → switch with break + return)
+- [ ] `switch` expressions with pattern matching (type patterns, property patterns)
 
 ## Next — tooling
 

@@ -1553,6 +1553,63 @@ fn restructure_collection_initializers(out: &mut Vec<String>) {
 ///       default:
 ///           ... default body ...
 ///   }
+/// Detect if a switch follows the switch-expression pattern: all case
+/// bodies end with `goto Label_XXXX;` targeting the same label.
+/// Returns the common label if detected, None otherwise.
+fn detect_switch_expr_pattern(
+    cases: &[(usize, String)],
+    label_bodies: &std::collections::HashMap<String, Vec<String>>,
+    default_label: &Option<String>,
+) -> Option<String> {
+    let mut common_label: Option<String> = None;
+    let mut all_match = true;
+
+    for (_, label) in cases {
+        if let Some(body) = label_bodies.get(label) {
+            // Check if the last line is `goto Label_XXXX;`
+            if let Some(last) = body.last() {
+                let last_trimmed = last.trim();
+                if last_trimmed.starts_with("goto Label_") && last_trimmed.ends_with(';') {
+                    // Extract just `Label_XXXX` from `goto Label_XXXX;`
+                    let goto_label = last_trimmed
+                        .strip_prefix("goto ")
+                        .unwrap_or(last_trimmed)
+                        .trim_end_matches(';')
+                        .to_string();
+                    if let Some(ref cl) = common_label {
+                        if cl != &goto_label {
+                            all_match = false;
+                            break;
+                        }
+                    } else {
+                        common_label = Some(goto_label);
+                    }
+                } else {
+                    all_match = false;
+                    break;
+                }
+            } else {
+                all_match = false;
+                break;
+            }
+        } else {
+            all_match = false;
+            break;
+        }
+    }
+
+    // Also check the default case (if present) — it should NOT have a goto
+    // (the default is the fallthrough, no goto needed).
+    // Actually, the default body might or might not have a goto. If it does,
+    // it should target the same label.
+
+    if all_match {
+        common_label
+    } else {
+        None
+    }
+}
+
 fn restructure_switch(out: &mut Vec<String>) {
     let mut i = 0;
     while i < out.len() {
@@ -1647,6 +1704,11 @@ fn restructure_switch(out: &mut Vec<String>) {
         }
 
         // Build the new switch block.
+        // Check if this is a switch expression pattern: all case bodies
+        // end with `goto Label_XXXX;` targeting the same label, and that
+        // label has `return V_N;` or `V_N = ...;`.
+        let switch_expr_label = detect_switch_expr_pattern(&cases, &label_bodies, &default_label);
+
         let mut new_lines: Vec<String> = Vec::new();
         new_lines.push(out[i].clone()); // `switch (v)`
         new_lines.push("        {".into());
@@ -1656,7 +1718,22 @@ fn restructure_switch(out: &mut Vec<String>) {
             if let Some(body) = label_bodies.get(label) {
                 for bl in body {
                     let stripped = bl.trim_start();
+                    // Skip the `goto Label_XXXX;` if it's the switch expr pattern.
+                    if let Some(se_label) = &switch_expr_label {
+                        if stripped == &format!("goto {se_label};") {
+                            continue;
+                        }
+                    }
                     new_lines.push(format!("                {stripped}"));
+                }
+                // Add `break;` after case body if the goto was removed
+                // (switch expression pattern).
+                if switch_expr_label.is_some() {
+                    // Only add break if the last line wasn't a return.
+                    let has_return = body.last().map(|l| l.trim().starts_with("return")).unwrap_or(false);
+                    if !has_return {
+                        new_lines.push("                break;".into());
+                    }
                 }
             }
         }
@@ -1667,7 +1744,18 @@ fn restructure_switch(out: &mut Vec<String>) {
                 new_lines.push("            default:".into());
                 for bl in body {
                     let stripped = bl.trim_start();
+                    if let Some(se_label) = &switch_expr_label {
+                        if stripped == &format!("goto {se_label};") {
+                            continue;
+                        }
+                    }
                     new_lines.push(format!("                {stripped}"));
+                }
+                if switch_expr_label.is_some() {
+                    let has_return = body.last().map(|l| l.trim().starts_with("return")).unwrap_or(false);
+                    if !has_return {
+                        new_lines.push("                break;".into());
+                    }
                 }
             }
         }
@@ -1678,9 +1766,14 @@ fn restructure_switch(out: &mut Vec<String>) {
         // It extends from `switch (v)` to the end of the last referenced
         // label's body.
         let mut last_line = switch_close;
-        let referenced_labels: Vec<&String> = cases.iter().map(|(_, l)| l)
+        let mut referenced_labels: Vec<&String> = cases.iter().map(|(_, l)| l)
             .chain(default_label.as_ref())
             .collect();
+        // If this is a switch expression pattern, also include the common
+        // goto target label so its body (e.g. `return V_0;`) is replaced.
+        if let Some(se_label) = &switch_expr_label {
+            referenced_labels.push(se_label);
+        }
         for (idx, (label_line, label)) in all_labels.iter().enumerate() {
             if referenced_labels.contains(&label) {
                 let body_end = if idx + 1 < all_labels.len() {
@@ -1698,6 +1791,17 @@ fn restructure_switch(out: &mut Vec<String>) {
                 };
                 if body_end > last_line {
                     last_line = body_end;
+                }
+            }
+        }
+
+        // If switch expression pattern, append the return/assignment from
+        // the common goto target label's body after the switch block.
+        if let Some(se_label) = &switch_expr_label {
+            if let Some(body) = label_bodies.get(se_label) {
+                for bl in body {
+                    let stripped = bl.trim_start();
+                    new_lines.push(format!("        {stripped}"));
                 }
             }
         }

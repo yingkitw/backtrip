@@ -148,6 +148,31 @@ fn decompiles_switch_statement() {
 }
 
 #[test]
+fn decompiles_switch_expression() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // Switch expression compiles to a switch with V_0 = ...; goto Label; pattern.
+    // Should be reconstructed as a switch with break; and return V_0;.
+    assert!(calc.source.contains("ClassifyDay"),
+        "ClassifyDay method missing;\n{}", calc.source);
+    assert!(calc.source.contains("V_0 = \"Sunday\";"),
+        "switch expression case body should be inlined;\n{}", calc.source);
+    assert!(calc.source.contains("V_0 = \"Unknown\";"),
+        "switch expression default body should be inlined;\n{}", calc.source);
+    // Should have break; after each case (switch expression pattern).
+    assert!(calc.source.contains("break;"),
+        "switch expression should have break;\n{}", calc.source);
+    // Should not have goto labels for cases.
+    assert!(!calc.source.contains("goto Label_0062"),
+        "switch expression should not have goto to end label;\n{}", calc.source);
+}
+
+#[test]
 fn decompiles_try_catch() {
     let (_pe, root, tables) = load_reader();
     let reader = Reader::new(&_pe, &root, &tables).unwrap();

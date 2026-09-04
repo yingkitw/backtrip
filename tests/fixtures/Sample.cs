@@ -200,6 +200,18 @@ namespace Shapes
             System.Func<int, int> adder = x => x + offset;
             return adder(10);
         }
+
+        public string ClassifyDay(int day) => day switch
+        {
+            0 => "Sunday",
+            1 => "Monday",
+            2 => "Tuesday",
+            3 => "Wednesday",
+            4 => "Thursday",
+            5 => "Friday",
+            6 => "Saturday",
+            _ => "Unknown"
+        };
     }
 
     public struct Point
