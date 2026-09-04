@@ -427,14 +427,19 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
     let param_names = method_param_names(reader, method_row, &sig, is_static);
     let param_rows = reader.method_param_rows(method_row);
     let param_table = reader.tables.get(tbl::PARAM);
-    // Build a map: sequence -> (1-based param row index, flags) for default lookup.
+    // Build maps: sequence -> (1-based param row index) for default lookup,
+    // and sequence -> is_out (Out flag 0x0008).
     let mut param_defaults: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
+    let mut param_is_out: std::collections::HashSet<u16> = std::collections::HashSet::new();
     for (idx, r) in param_table[param_rows.clone()].iter().enumerate() {
         let flags = reader.param_flags(r);
+        let seq = reader.param_sequence(r);
         if flags & 0x1000 != 0 {
-            // The 1-based Param row index = param_rows.start + idx + 1.
             let row_1based = (param_rows.start + idx) as u32 + 1;
-            param_defaults.insert(reader.param_sequence(r), row_1based);
+            param_defaults.insert(seq, row_1based);
+        }
+        if flags & 0x0002 != 0 {
+            param_is_out.insert(seq);
         }
     }
     let params: Vec<String> = sig
@@ -444,10 +449,17 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
         .map(|(i, t)| {
             let pname = param_names.get(i).cloned().unwrap_or_else(|| format!("arg{i}"));
             let seq = (i + 1) as u16;
+            // Check for default value.
             if let Some(&param_row) = param_defaults.get(&seq) {
                 if let Some((tc, blob)) = reader.constant_for_param(param_row) {
                     let def = format_constant(tc, blob);
                     return format!("{} {} = {}", reader.type_name(t), pname, def);
+                }
+            }
+            // Check for out parameter (ByRef + Out flag → `out` instead of `ref`).
+            if param_is_out.contains(&seq) {
+                if let Type::ByRef(inner) = t {
+                    return format!("out {} {}", reader.type_name(inner), pname);
                 }
             }
             format!("{} {}", reader.type_name(t), pname)
@@ -599,6 +611,9 @@ fn decompile_body(
 
     // Post-process: restructure while loops from back-edges.
     restructure_while_loops(&mut out);
+
+    // Post-process: convert while loops with init+increment to for loops.
+    restructure_for_loops(&mut out);
 
     let mut s = String::new();
     // Local declarations.
@@ -890,6 +905,78 @@ fn restructure_do_while_loops(out: &mut Vec<String>) {
         out[back_idx] = format!("        }} while {cond};");
 
         i = back_idx + 1;
+    }
+}
+
+/// Post-process: convert `init; while (cond) { body; increment; }` into
+/// `for (init; cond; increment) { body; }`.
+///
+/// Detection criteria:
+/// 1. A `while (cond) {` line where cond involves a variable V
+/// 2. The previous non-empty line is `V = <init>;`
+/// 3. The last non-empty line before the closing `}` is `V = (V <op> <delta>);`
+fn restructure_for_loops(out: &mut Vec<String>) {
+    let mut i = 0;
+    while i < out.len() {
+        // Look for `while (cond) {`
+        let line = &out[i];
+        let trimmed = line.trim();
+        if !trimmed.starts_with("while (") || !trimmed.ends_with('{') {
+            i += 1;
+            continue;
+        }
+
+        // Extract the loop variable from the condition.
+        // Condition is like `(V_1 <= n)` — take the first operand.
+        let cond_inner = trimmed.trim_start_matches("while (").trim_end_matches(") {");
+        let loop_var = match cond_inner.split_whitespace().next() {
+            Some(v) => v.trim(),
+            None => { i += 1; continue; }
+        };
+
+        // Check the previous non-empty line is `V = <init>;`
+        let init_idx = if i > 0 {
+            (0..i).rev().find(|&j| !out[j].trim().is_empty())
+        } else {
+            None
+        };
+        let init_idx = match init_idx {
+            Some(idx) => idx,
+            None => { i += 1; continue; }
+        };
+        let init_line = out[init_idx].trim().to_string();
+        if !init_line.starts_with(&format!("{loop_var} = ")) || !init_line.ends_with(';') {
+            i += 1;
+            continue;
+        }
+        let init_expr = &init_line[format!("{loop_var} = ").len()..].trim_end_matches(';');
+
+        // Find the closing `}` for this while loop.
+        let close_idx = match out[i+1..].iter().position(|l| l.trim() == "}") {
+            Some(p) => i + 1 + p,
+            None => { i += 1; continue; }
+        };
+
+        // Find the last non-empty line before `}` — should be the increment.
+        let incr_idx = (i+1..close_idx).rev().find(|&j| !out[j].trim().is_empty());
+        let incr_idx = match incr_idx {
+            Some(idx) => idx,
+            None => { i += 1; continue; }
+        };
+        let incr_line = out[incr_idx].trim().to_string();
+        // Increment must be `V = (V <op> <delta>);` or `V = <expr>;` involving V.
+        if !incr_line.starts_with(&format!("{loop_var} = ")) || !incr_line.ends_with(';') {
+            i += 1; continue;
+        }
+        let incr_expr = &incr_line[format!("{loop_var} = ").len()..].trim_end_matches(';');
+
+        // All criteria met — restructure as for loop.
+        let cond_str = cond_inner;
+        out[i] = format!("        for ({loop_var} = {init_expr}; {cond_str}; {loop_var} = {incr_expr}) {{");
+        // Remove the init line and increment line.
+        out[init_idx] = String::new();
+        out[incr_idx] = String::new();
+        i = close_idx + 1;
     }
 }
 
@@ -1200,6 +1287,9 @@ fn handle_instr(
                     } else {
                         format!("{obj}.{mname}({})", args.join(", "))
                     }
+                } else if owner == "String" && mname == "Concat" {
+                    // String.Concat(a, b, c, ...) → a + b + c
+                    args.join(" + ")
                 } else {
                     format!("{owner}.{mname}({})", args.join(", "))
                 };
@@ -1418,33 +1508,140 @@ fn store_local(out: &mut Vec<String>, stack: &mut Vec<String>, local_names: &[St
     out.push(format!("        {lname} = {v};"));
 }
 
+/// Precedence level of a binary operator (higher = binds tighter).
+/// Returns 0 for unknown operators.
+fn prec(op: &str) -> u8 {
+    match op {
+        "*" | "/" | "%" => 7,
+        "+" | "-" => 6,
+        "<<" | ">>" => 5,
+        "<" | "<=" | ">" | ">=" | "==" | "!=" => 4,
+        "&" => 3,
+        "^" => 2,
+        "|" => 1,
+        "&&" | "||" => 0,
+        _ => 0,
+    }
+}
+
+/// Strip outer parentheses from an expression if present.
+fn strip_outer_parens(s: &str) -> &str {
+    let t = s.trim();
+    if t.starts_with('(') && t.ends_with(')') {
+        // Check the parens are balanced and match.
+        let inner = &t[1..t.len()-1];
+        let mut depth = 0;
+        for (i, c) in inner.chars().enumerate() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    if depth == 0 {
+                        // Unbalanced — these parens don't match.
+                        return t;
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+            let _ = i;
+        }
+        if depth == 0 {
+            return inner.trim();
+        }
+    }
+    t
+}
+
+/// Get the top-level operator of an expression (for precedence comparison).
+/// Returns None for atoms (variables, literals, calls).
+fn top_op(s: &str) -> Option<&str> {
+    let t = strip_outer_parens(s);
+    // If the stripped expression still has parens at top level, it's an atom.
+    // Find the lowest-precedence operator at depth 0.
+    let mut depth = 0;
+    let mut best: Option<(&str, usize)> = None;
+    let bytes = t.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ if depth == 0 => {
+                // Check for two-char operators.
+                let two = if i + 1 < bytes.len() {
+                    std::str::from_utf8(&bytes[i..i+2]).ok()
+                } else { None };
+                if let Some(two) = two {
+                    if matches!(two, "<<" | ">>" | "<=" | ">=" | "==" | "!=" | "&&" | "||") {
+                        let p = prec(two) as usize;
+                        if best.map(|(_, bp)| p <= bp).unwrap_or(true) {
+                            best = Some((two, p));
+                        }
+                        i += 2;
+                        continue;
+                    }
+                }
+                let one = std::str::from_utf8(&bytes[i..i+1]).ok();
+                if let Some(one) = one {
+                    if matches!(one, "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<" | ">") {
+                        let p = prec(one) as usize;
+                        if best.map(|(_, bp)| p <= bp).unwrap_or(true) {
+                            best = Some((one, p));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    best.map(|(op, _)| op)
+}
+
 fn binop(stack: &mut Vec<String>, op: &str) {
     let b = stack.pop().unwrap_or_else(|| "/*?*/".into());
     let a = stack.pop().unwrap_or_else(|| "/*?*/".into());
-    stack.push(format!("({a} {op} {b})"));
+    let my_prec = prec(op);
+    // Strip outer parens from operands if their top-level op has >= precedence.
+    let a_stripped = if top_op(&a).map(|o| prec(o) >= my_prec).unwrap_or(true) {
+        strip_outer_parens(&a)
+    } else {
+        a.as_str()
+    };
+    let b_stripped = if top_op(&b).map(|o| prec(o) > my_prec).unwrap_or(true) {
+        strip_outer_parens(&b)
+    } else {
+        b.as_str()
+    };
+    stack.push(format!("{a_stripped} {op} {b_stripped}"));
 }
 
 fn unop(stack: &mut Vec<String>, op: &str) {
     let a = stack.pop().unwrap_or_else(|| "/*?*/".into());
-    stack.push(format!("({op}{a})"));
+    stack.push(format!("{op}{a}"));
 }
 
 fn conv(stack: &mut Vec<String>, ty: &str) {
     let a = stack.pop().unwrap_or_else(|| "/*?*/".into());
-    stack.push(format!("(({ty})({a}))"));
+    let a_stripped = strip_outer_parens(&a);
+    stack.push(format!("({ty})({a_stripped})"));
 }
 
 fn cmp_op(stack: &mut Vec<String>, op: &str) {
     let b = stack.pop().unwrap_or_else(|| "/*?*/".into());
     let a = stack.pop().unwrap_or_else(|| "/*?*/".into());
-    stack.push(format!("({a} {op} {b} ? 1 : 0)"));
+    let a_s = strip_outer_parens(&a);
+    let b_s = strip_outer_parens(&b);
+    stack.push(format!("({a_s} {op} {b_s} ? 1 : 0)"));
 }
 
 fn cmp_branch(out: &mut Vec<String>, stack: &mut Vec<String>, ins: &Instruction, op: &str) {
     let tgt = branch_target_of(ins);
     let b = stack.pop().unwrap_or_else(|| "/*?*/".into());
     let a = stack.pop().unwrap_or_else(|| "/*?*/".into());
-    out.push(format!("        if ({a} {op} {b}) goto Label_{tgt:04X};"));
+    let a_s = strip_outer_parens(&a);
+    let b_s = strip_outer_parens(&b);
+    out.push(format!("        if ({a_s} {op} {b_s}) goto Label_{tgt:04X};"));
 }
 
 fn branch_target_of(ins: &Instruction) -> usize {

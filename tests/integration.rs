@@ -50,9 +50,9 @@ fn decompiles_calculator_add_body() {
         .expect("Calculator file");
     assert!(calc.source.contains("public class Calculator"));
     assert!(calc.source.contains("public int Add(int a, int b)"));
-    assert!(calc.source.contains("return (a + b);"));
+    assert!(calc.source.contains("return a + b;"));
     assert!(calc.source.contains("public static int Square(int x)"));
-    assert!(calc.source.contains("return (x * x);"));
+    assert!(calc.source.contains("return x * x;"));
     // const field: Literal flag + Constant table value.
     assert!(calc.source.contains("public const int MaxValue = 100;"));
     // Property: auto-property rendered as { get; set; }, not get_/set_ methods.
@@ -161,7 +161,7 @@ fn decompiles_if_else() {
     // if/else: should render `if (x < 0) {` with a block, not `if (x >= 0) goto`.
     assert!(calc.source.contains("if (x < 0) {"),
         "if block missing;\n{}", calc.source);
-    assert!(calc.source.contains("return (-x);"),
+    assert!(calc.source.contains("return -x;"),
         "if body missing;\n{}", calc.source);
     // Must not render as `if (x >= 0) goto Label_`.
     assert!(!calc.source.contains("if (x >= 0) goto"),
@@ -177,13 +177,12 @@ fn decompiles_while_loop() {
         .iter()
         .find(|t| t.file_name.contains("Calculator"))
         .expect("Calculator file");
-    // while loop: should render `while (V_1 <= n) {` with a block body.
-    assert!(calc.source.contains("while (V_1 <= n) {"),
-        "while loop missing;\n{}", calc.source);
-    // Must not render the while loop as `goto Label_` + `if ... goto` back-edge.
-    // (The try/catch leave instructions are separate and acceptable.)
+    // while/for loop: SumUpTo has init+increment so it's upgraded to a for loop.
+    assert!(calc.source.contains("for (V_1 = 1; V_1 <= n; V_1 = V_1 + 1) {"),
+        "for loop (from while) missing;\n{}", calc.source);
+    // Must not render the loop as `goto Label_` + `if ... goto` back-edge.
     assert!(!calc.source.contains("goto Label_000E;\n        Label_0006:"),
-        "should use while, not goto for loop;\n{}", calc.source);
+        "should use for, not goto for loop;\n{}", calc.source);
 }
 
 #[test]
@@ -206,6 +205,43 @@ fn decompiles_do_while_loop() {
 }
 
 #[test]
+fn decompiles_for_loop() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // for loop: should render `for (V_1 = 1; V_1 <= n; V_1 = V_1 + 1) {`
+    assert!(calc.source.contains("for (V_1 = 1; V_1 <= n; V_1 = V_1 + 1) {"),
+        "for loop missing;\n{}", calc.source);
+    // Must not render as `while (V_1 <= n) {` (should be upgraded to for).
+    assert!(!calc.source.contains("while (V_1 <= n)"),
+        "should use for, not while;\n{}", calc.source);
+}
+
+#[test]
+fn decompiles_ref_out_parameters() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // ref parameters: `ref int a, ref int b`
+    assert!(calc.source.contains("ref int a, ref int b"),
+        "ref parameters missing;\n{}", calc.source);
+    // out parameters: `out int result`
+    assert!(calc.source.contains("out int result"),
+        "out parameter missing;\n{}", calc.source);
+    // Must not render out as ref.
+    assert!(!calc.source.contains("ref int result"),
+        "out parameter should not render as ref;\n{}", calc.source);
+}
+
+#[test]
 fn decompiles_string_concat() {
     let (_pe, root, tables) = load_reader();
     let reader = Reader::new(&_pe, &root, &tables).unwrap();
@@ -214,7 +250,11 @@ fn decompiles_string_concat() {
         .iter()
         .find(|t| t.file_name.contains("Calculator"))
         .unwrap();
-    assert!(calc.source.contains("String.Concat(\"Hello, \", name, \"!\")"));
+    // String.Concat should be reconstructed as + operators.
+    assert!(calc.source.contains("\"Hello, \" + name + \"!\""),
+        "string concat not reconstructed as +;\n{}", calc.source);
+    assert!(!calc.source.contains("String.Concat("),
+        "should use +, not String.Concat;\n{}", calc.source);
 }
 
 #[test]

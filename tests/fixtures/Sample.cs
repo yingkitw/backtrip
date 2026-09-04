@@ -121,6 +121,29 @@ namespace Shapes
             } while (start > 0);
             return count;
         }
+
+        public int SumFor(int n)
+        {
+            int sum = 0;
+            for (int i = 1; i <= n; i++)
+            {
+                sum += i;
+            }
+            return sum;
+        }
+
+        public void Swap(ref int a, ref int b)
+        {
+            int tmp = a;
+            a = b;
+            b = tmp;
+        }
+
+        public bool TryParseInt(string s, out int result)
+        {
+            result = 0;
+            return int.TryParse(s, out result);
+        }
     }
 
     public struct Point

@@ -43,7 +43,7 @@
 - [x] Structured control-flow recovery: `if`/`else` from conditional branches
 - [x] `while` loop reconstruction from back-edges
 - [x] `do`-`while` loop reconstruction
-- [ ] `for` loop reconstruction (detect init + increment pattern)
+- [x] `for` loop reconstruction (detect init + increment pattern)
 
 ## Next — language features
 
@@ -52,14 +52,14 @@
 ## Next — decompiler quality
 
 - [ ] Type-name disambiguation: avoid collisions, emit `using` / full names
-- [ ] Remove redundant parentheses in expressions (precedence-aware printing)
+- [x] Remove redundant parentheses in expressions (precedence-aware printing)
 - [ ] Collapse `dup`/`pop` patterns into temporaries cleanly
-- [ ] Reconstruct `ref`/`out`/`in` parameters from `ByRef` + modreq
+- [x] Reconstruct `ref`/`out`/`in` parameters from `ByRef` + modreq
 - [ ] Reconstruct `foreach` over `IEnumerable` from enumerator patterns
 - [ ] Reconstruct `using` blocks from `IDisposable` patterns
 - [ ] Reconstruct `lock` blocks from `Monitor.Enter/Exit`
 - [ ] Reconstruct auto-properties from compiler-generated backing fields
-- [ ] Reconstruct `string.Concat` chains back to `+` operators
+- [x] Reconstruct `string.Concat` chains back to `+` operators
 - [ ] Reconstruct collection initializers, object initializers
 
 ## Next — async / closures / state machines
