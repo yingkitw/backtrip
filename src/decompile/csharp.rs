@@ -594,6 +594,12 @@ fn decompile_body(
     // Post-process: restructure if/else from conditional branches.
     restructure_if_else(&mut out);
 
+    // Post-process: restructure do-while loops (must run before while).
+    restructure_do_while_loops(&mut out);
+
+    // Post-process: restructure while loops from back-edges.
+    restructure_while_loops(&mut out);
+
     let mut s = String::new();
     // Local declarations.
     for (i, lt) in local_types.iter().enumerate() {
@@ -604,6 +610,9 @@ fn decompile_body(
         s.push('\n');
     }
     for line in &out {
+        if line.is_empty() {
+            continue;
+        }
         s.push_str(line);
         s.push('\n');
     }
@@ -618,7 +627,7 @@ fn local_type_names(local_types: &[Type]) -> Vec<String> {
 /// `if (a >= b) goto L;` → `if (a < b) { ... }`
 fn negate_cond(cond: &str) -> String {
     // cond is like "(a >= b)" — find the operator and flip it.
-    let ops = [(">=", "<="), ("<=", ">="), (">", "<"), ("<", ">"), ("==", "!="), ("!=", "==")];
+    let ops = [(">=", "<"), ("<=", ">"), (">", "<="), ("<", ">="), ("==", "!="), ("!=", "==")];
     for (a, b) in ops {
         if cond.contains(a) {
             return cond.replacen(a, b, 1);
@@ -718,6 +727,169 @@ fn restructure_if_else(out: &mut Vec<String>) {
         // No else: replace the label with `}`
         out[label_idx] = "        }".to_string();
         i = label_idx + 1;
+    }
+}
+
+/// Post-process the output lines to restructure while loops from back-edges.
+/// Pattern:
+///   goto Label_XXXX;          (jump to condition check)
+///   Label_YYYY:               (loop body start)
+///   ... loop body ...
+///   Label_XXXX:               (loop header / condition check)
+///   if (cond) goto Label_YYYY;  (back-edge to loop body)
+///   ... after loop ...
+///
+/// Transforms to:
+///   while (!cond) {
+///     ... loop body ...
+///   }
+///   ... after loop ...
+fn restructure_while_loops(out: &mut Vec<String>) {
+    let mut i = 0;
+    while i < out.len() {
+        // Look for: `goto Label_XXXX;` (forward jump to loop header)
+        let line = &out[i];
+        let trimmed = line.trim();
+        if !trimmed.starts_with("goto Label_") {
+            i += 1;
+            continue;
+        }
+        let header_label = trimmed.trim_start_matches("goto ").trim_end_matches(';');
+
+        // Find the header label line (must be after current line).
+        let header_pattern = format!("Label_{}:", header_label.trim_start_matches("Label_"));
+        let header_idx = match out[i+1..].iter().position(|l| l.trim() == header_pattern) {
+            Some(p) => i + 1 + p,
+            None => { i += 1; continue; }
+        };
+
+        // The line after the header should be `if (cond) goto Label_YYYY;` (back-edge).
+        if header_idx + 1 >= out.len() {
+            i += 1;
+            continue;
+        }
+        let cond_line = out[header_idx + 1].trim().to_string();
+        if !cond_line.starts_with("if (") || !cond_line.contains(") goto Label_") {
+            i += 1;
+            continue;
+        }
+
+        // Extract the back-edge target (loop body start label).
+        let back_label = match cond_line.rsplit("goto ").next() {
+            Some(s) => s.trim().trim_end_matches(';'),
+            None => { i += 1; continue; }
+        };
+
+        // The back-edge target must be between the initial goto and the header.
+        let back_pattern = format!("Label_{}:", back_label.trim_start_matches("Label_"));
+        let body_start = match out[i+1..header_idx].iter().position(|l| l.trim() == back_pattern) {
+            Some(p) => i + 1 + p,
+            None => { i += 1; continue; }
+        };
+
+        // Extract the condition.
+        let cond_start = cond_line.find("if (").map(|p| p + 4).unwrap_or(0);
+        let cond_end = match cond_line[cond_start..].find(") goto") {
+            Some(p) => cond_start + p,
+            None => { i += 1; continue; }
+        };
+        let cond = format!("({})", &cond_line[cond_start..cond_end]);
+
+        // Restructure:
+        // 1. Replace the initial `goto Label_XXXX;` with `while (cond) {`
+        //    (the condition is NOT negated — the back-edge means "continue while true")
+        out[i] = format!("        while {cond} {{");
+
+        // 2. Remove the loop body start label (Label_YYYY:)
+        out[body_start] = String::new(); // will be filtered out
+
+        // 3. Indent the loop body (between body_start+1 and header_idx)
+        for j in (body_start+1)..header_idx {
+            if !out[j].trim().is_empty() {
+                out[j] = format!("    {}", out[j]);
+            }
+        }
+
+        // 4. Replace the header label with `}`
+        out[header_idx] = "        }".to_string();
+
+        // 5. Remove the back-edge if-line (it's now part of the while)
+        out[header_idx + 1] = String::new();
+
+        i = header_idx + 2;
+    }
+}
+
+/// Post-process the output lines to restructure do-while loops.
+/// Pattern:
+///   Label_XXXX:               (loop body start)
+///   ... loop body ...
+///   if (cond) goto Label_XXXX;  (back-edge to same label — no initial goto)
+///
+/// Transforms to:
+///   do {
+///     ... loop body ...
+///   } while (cond);
+fn restructure_do_while_loops(out: &mut Vec<String>) {
+    let mut i = 0;
+    while i < out.len() {
+        // Look for a label line: `Label_XXXX:`
+        let line = &out[i];
+        let trimmed = line.trim();
+        if !trimmed.starts_with("Label_") || !trimmed.ends_with(':') {
+            i += 1;
+            continue;
+        }
+        let label_name = trimmed.trim_end_matches(':');
+
+        // Exclude while loops: if the previous line is `goto Label_YYYY;`
+        // (jumping to a different label), this is a while loop header, not do-while.
+        if i > 0 {
+            let prev = out[i - 1].trim();
+            if prev.starts_with("goto Label_") && !prev.contains(&format!("goto {};", label_name)) {
+                i += 1;
+                continue;
+            }
+        }
+
+        // Search forward for `if (cond) goto Label_XXXX;` (back-edge to same label).
+        let back_pattern = format!("goto {};", label_name);
+        let back_idx = out[i+1..].iter().position(|l| l.trim().contains(&back_pattern) && l.trim().starts_with("if ("));
+        let back_idx = match back_idx {
+            Some(p) => i + 1 + p,
+            None => { i += 1; continue; }
+        };
+
+        // The back-edge line must be `if (cond) goto Label_XXXX;`
+        let back_line = out[back_idx].trim().to_string();
+        if !back_line.starts_with("if (") || !back_line.ends_with(';') {
+            i += 1;
+            continue;
+        }
+
+        // Extract the condition.
+        let cond_start = back_line.find("if (").map(|p| p + 4).unwrap_or(0);
+        let cond_end = match back_line[cond_start..].find(") goto") {
+            Some(p) => cond_start + p,
+            None => { i += 1; continue; }
+        };
+        let cond = format!("({})", &back_line[cond_start..cond_end]);
+
+        // Restructure:
+        // 1. Replace the label with `do {`
+        out[i] = "        do {".to_string();
+
+        // 2. Indent the loop body (between label and back-edge)
+        for j in (i+1)..back_idx {
+            if !out[j].trim().is_empty() {
+                out[j] = format!("    {}", out[j]);
+            }
+        }
+
+        // 3. Replace the back-edge with `} while (cond);`
+        out[back_idx] = format!("        }} while {cond};");
+
+        i = back_idx + 1;
     }
 }
 

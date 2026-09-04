@@ -158,14 +158,51 @@ fn decompiles_if_else() {
         .iter()
         .find(|t| t.file_name.contains("Calculator"))
         .expect("Calculator file");
-    // if/else: should render `if (x <= 0) {` with a block, not `if (x >= 0) goto`.
-    assert!(calc.source.contains("if (x <= 0) {"),
+    // if/else: should render `if (x < 0) {` with a block, not `if (x >= 0) goto`.
+    assert!(calc.source.contains("if (x < 0) {"),
         "if block missing;\n{}", calc.source);
     assert!(calc.source.contains("return (-x);"),
         "if body missing;\n{}", calc.source);
     // Must not render as `if (x >= 0) goto Label_`.
     assert!(!calc.source.contains("if (x >= 0) goto"),
         "should use if block, not goto;\n{}", calc.source);
+}
+
+#[test]
+fn decompiles_while_loop() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // while loop: should render `while (V_1 <= n) {` with a block body.
+    assert!(calc.source.contains("while (V_1 <= n) {"),
+        "while loop missing;\n{}", calc.source);
+    // Must not render the while loop as `goto Label_` + `if ... goto` back-edge.
+    // (The try/catch leave instructions are separate and acceptable.)
+    assert!(!calc.source.contains("goto Label_000E;\n        Label_0006:"),
+        "should use while, not goto for loop;\n{}", calc.source);
+}
+
+#[test]
+fn decompiles_do_while_loop() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // do-while: should render `do {` ... `} while (start > 0);`
+    assert!(calc.source.contains("do {"),
+        "do block missing;\n{}", calc.source);
+    assert!(calc.source.contains("} while (start > 0);"),
+        "do-while condition missing;\n{}", calc.source);
+    // Must not render as `Label_0002:` + `if ... goto Label_0002;`
+    assert!(!calc.source.contains("if (start > 0) goto Label_0002;"),
+        "should use do-while, not goto;\n{}", calc.source);
 }
 
 #[test]

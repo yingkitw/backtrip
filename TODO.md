@@ -41,7 +41,9 @@
 ## Next — control flow
 
 - [x] Structured control-flow recovery: `if`/`else` from conditional branches
-- [ ] `while`/`for`/`do`-`while` loop reconstruction from back-edges
+- [x] `while` loop reconstruction from back-edges
+- [x] `do`-`while` loop reconstruction
+- [ ] `for` loop reconstruction (detect init + increment pattern)
 
 ## Next — language features
 

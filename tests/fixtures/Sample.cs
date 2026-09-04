@@ -110,6 +110,17 @@ namespace Shapes
             }
             return 0;
         }
+
+        public int CountDown(int start)
+        {
+            int count = 0;
+            do
+            {
+                count++;
+                start--;
+            } while (start > 0);
+            return count;
+        }
     }
 
     public struct Point
