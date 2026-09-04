@@ -11,6 +11,18 @@ namespace Shapes
             Value = value;
         }
 
+        public class Settings
+        {
+            public bool Enabled;
+            public string Label;
+
+            public Settings(string label)
+            {
+                Label = label;
+                Enabled = true;
+            }
+        }
+
         public int Add(int a, int b)
         {
             return a + b;
@@ -53,5 +65,12 @@ namespace Shapes
             int dy = Y - other.Y;
             return System.Math.Sqrt(dx * dx + dy * dy);
         }
+    }
+
+    public enum Color
+    {
+        Red = 0,
+        Green = 1,
+        Blue = 2
     }
 }

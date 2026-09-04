@@ -147,7 +147,7 @@ pub fn schema(table: u8) -> Option<&'static [Col]> {
         tbl::TYPESPEC => &[Blob],
         tbl::IMPLMAP => &[U16, CodedIdx(Coded::MemberForwarded), String, Table(tbl::MODULEREF)],
         tbl::FIELDRVA => &[U32, Table(tbl::FIELD)],
-        tbl::ASSEMBLY => &[U32, U16, U16, U16, U16, U32, Blob, String, String, Blob],
+        tbl::ASSEMBLY => &[U32, U16, U16, U16, U16, U32, Blob, String, String],
         tbl::ASSEMBLYPROCESSOR => &[U32],
         tbl::ASSEMBLYOS => &[U32, U32, U32],
         tbl::ASSEMBLYREF => &[U16, U16, U16, U16, U32, Blob, String, String, Blob],

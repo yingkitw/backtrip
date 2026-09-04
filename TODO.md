@@ -22,6 +22,8 @@
 - [x] `--type <NAME>` to decompile a single type
 - [x] `--stdout` to print a type to stdout instead of writing files
 - [x] Better IL disassembly: resolve `ldstr` to the literal, locals names
+- [x] `enum` underlying values (Constant table + Field defaults)
+- [x] Nested types (NestedClass table → nested class output)
 
 ## Next — control flow
 
@@ -36,9 +38,7 @@
 - [ ] Properties (PropertyMap / Property / MethodSemantics → getter/setter)
 - [ ] Events (EventMap / Event / MethodSemantics → add/remove/raise)
 - [ ] Custom attributes (CustomAttribute table → `[Attr(...)]`)
-- [ ] `enum` underlying values (Constant table + Field defaults)
 - [ ] Delegate types (`MulticastDelegate` base → `delegate` declaration)
-- [ ] Nested types (NestedClass table → nested class output)
 - [ ] Explicit interface implementations (MethodImpl)
 - [ ] P/Invoke (ImplMap / ModuleRef → `extern`)
 - [ ] Static constants / `const` fields (Literal flag + Constant table)

@@ -90,6 +90,21 @@ impl<'a> Reader<'a> {
         parse_field_sig(self.blob(row.col(2)))
     }
 
+    /// Look up the Constant table row for a given field (1-based row index).
+    /// Returns `(type_code, value_bytes)` where `type_code` is the ECMA-335
+    /// II.23.1.16 element type (e.g. 0x08 = int32).
+    pub fn constant_for_field(&self, field_row: u32) -> Option<(u8, &[u8])> {
+        for r in self.tables.get(tbl::CONSTANT) {
+            let parent = decode_coded(Coded::HasConstant, r.col(2));
+            if parent.table == Some(tbl::FIELD) && parent.row == field_row {
+                let type_code = r.col(0) as u8;
+                let blob = self.blob(r.col(3));
+                return Some((type_code, blob));
+            }
+        }
+        None
+    }
+
     // ---- Param ----
     pub fn param_name(&self, row: &crate::metadata::tables::Row) -> String {
         self.string(row.col(2))

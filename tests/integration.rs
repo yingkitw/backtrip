@@ -83,6 +83,41 @@ fn decompiles_struct_point() {
 }
 
 #[test]
+fn decompiles_enum_with_values() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let color = types
+        .iter()
+        .find(|t| t.file_name.contains("Color"))
+        .expect("Color enum file");
+    assert!(color.source.contains("public enum Color : int"));
+    assert!(color.source.contains("Red = 0"));
+    assert!(color.source.contains("Green = 1"));
+    assert!(color.source.contains("Blue = 2"));
+    // The synthetic value__ field must not appear as a member.
+    assert!(!color.source.contains("value__"));
+}
+
+#[test]
+fn decompiles_nested_type_inside_parent() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    // Settings should NOT get its own file — it's nested inside Calculator.
+    assert!(types.iter().all(|t| !t.file_name.contains("Settings")),
+        "Settings should not have its own file");
+    // Calculator's source should contain the nested Settings class.
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    assert!(calc.source.contains("class Settings"), "nested Settings class missing;\n{}", calc.source);
+    assert!(calc.source.contains("public Settings(string label)"), "nested Settings ctor missing");
+    assert!(calc.source.contains("this.Enabled = 1"), "nested Settings ctor body missing");
+}
+
+#[test]
 fn decompiles_constructor() {
     let (_pe, root, tables) = load_reader();
     let reader = Reader::new(&_pe, &root, &tables).unwrap();

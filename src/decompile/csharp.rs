@@ -21,6 +21,10 @@ pub fn decompile_assembly(reader: &Reader<'_>) -> Result<Vec<DecompiledType>> {
         if name == "<Module>" {
             continue;
         }
+        // Nested types are rendered inside their parent; skip them here.
+        if reader.nested_parent(row_idx).is_some() {
+            continue;
+        }
         let source = decompile_type(reader, row_idx)?;
         let ns = reader.type_def_namespace(row);
         let file_name = file_name_for(&ns, &name);
@@ -46,6 +50,10 @@ pub fn decompile_type_by_name(reader: &Reader<'_>, query: &str) -> Result<Option
             format!("{ns}.{name}")
         };
         if name == query || full == query {
+            // Nested types are rendered inside their parent; skip standalone.
+            if reader.nested_parent(row_idx).is_some() {
+                continue;
+            }
             let source = decompile_type(reader, row_idx)?;
             let file_name = file_name_for(&ns, &name);
             return Ok(Some(DecompiledType { file_name, source }));
@@ -138,6 +146,38 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
     // Fields.
     let field_range = reader.type_field_rows(row_idx);
     let has_fields = !field_range.is_empty();
+    if is_enum {
+        // Enums: render `enum Name : UnderlyingType { A = 0, B = 1, }`.
+        // The `value__` instance field carries the underlying type; the
+        // named members are static literal fields with Constant rows.
+        let mut underlying = "int".to_string();
+        let mut members: Vec<String> = Vec::new();
+        for fi in field_range {
+            let f = &reader.tables.get(tbl::FIELD)[fi];
+            let fname = reader.field_name(f);
+            if fname == "value__" {
+                if let Ok(t) = reader.field_type(f) {
+                    underlying = reader.type_name(&t);
+                }
+                continue;
+            }
+            // Named enum member: look up its constant value.
+            let value = reader
+                .constant_for_field(fi as u32 + 1)
+                .map(|(tc, blob)| format_constant(tc, blob))
+                .unwrap_or_else(|| "0".into());
+            members.push(format!("{fname} = {value}"));
+        }
+        // Rewrite the header to include the underlying type.
+        // `enum Name : int` — replace the already-emitted `enum Name`.
+        let header_marker = format!("enum {name}");
+        if let Some(pos) = s.rfind(&header_marker) {
+            s.replace_range(pos..pos + header_marker.len(), &format!("enum {name} : {underlying}"));
+        }
+        s.push_str(&format!("    {}\n", members.join(",\n    ")));
+        s.push_str("}\n");
+        return Ok(s);
+    }
     for fi in field_range {
         let f = &reader.tables.get(tbl::FIELD)[fi];
         let fname = reader.field_name(f);
@@ -162,8 +202,54 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
         s.push('\n');
     }
 
+    // Nested types: render child types inside the parent's braces.
+    let nested_children = nested_types_for(reader, row_idx);
+    for child_idx in nested_children {
+        let child_src = decompile_nested_type(reader, child_idx)?;
+        s.push_str(&child_src);
+        s.push('\n');
+    }
+
     s.push_str("}\n");
     Ok(s)
+}
+
+/// Find all TypeDef rows whose NestedClass parent is `row_idx`.
+fn nested_types_for(reader: &Reader<'_>, row_idx: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let type_defs = reader.tables.get(tbl::TYPEDEF);
+    for (i, _row) in type_defs.iter().enumerate() {
+        let child_idx = (i + 1) as u32;
+        if reader.nested_parent(child_idx) == Some(row_idx) {
+            out.push(child_idx);
+        }
+    }
+    out
+}
+
+/// Decompile a nested type: same as `decompile_type` but without the
+/// namespace header and indented one level for embedding inside the parent.
+fn decompile_nested_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
+    let src = decompile_type(reader, row_idx)?;
+    // Strip the namespace header (if any) and indent every remaining line.
+    let mut lines = src.lines();
+    let mut body = String::new();
+    // Skip leading `namespace ...;` line(s) and blank lines.
+    let mut started = false;
+    for line in &mut lines {
+        if !started && (line.starts_with("namespace ") || line.is_empty()) {
+            continue;
+        }
+        started = true;
+        if line.is_empty() {
+            body.push('\n');
+        } else {
+            body.push_str("    ");
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    Ok(body)
 }
 
 fn base_type_name(reader: &Reader<'_>, extends: CodedIndex) -> Option<String> {
@@ -1007,6 +1093,24 @@ fn field_access(flags: u16) -> &'static str {
         5 => "protected internal",
         6 => "public",
         _ => "",
+    }
+}
+
+/// Format a Constant table value blob (ECMA-335 II.23.1.16) as a C# literal.
+/// `type_code` is the element type; `blob` is the raw little-endian bytes.
+fn format_constant(type_code: u8, blob: &[u8]) -> String {
+    match type_code {
+        0x06 => i8::from_le_bytes([blob.get(0).copied().unwrap_or(0)]).to_string(),       // int8
+        0x07 => u8::from_le_bytes([blob.get(0).copied().unwrap_or(0)]).to_string(),       // uint8
+        0x08 => i16::from_le_bytes(blob[..2.min(blob.len())].try_into().unwrap_or([0, 0])).to_string(),  // int16
+        0x09 => u16::from_le_bytes(blob[..2.min(blob.len())].try_into().unwrap_or([0, 0])).to_string(),  // uint16
+        0x0a => i32::from_le_bytes(blob[..4.min(blob.len())].try_into().unwrap_or([0, 0, 0, 0])).to_string(),  // int32
+        0x0b => u32::from_le_bytes(blob[..4.min(blob.len())].try_into().unwrap_or([0, 0, 0, 0])).to_string(),  // uint32
+        0x0c => format!("{}L", i64::from_le_bytes(blob[..8.min(blob.len())].try_into().unwrap_or([0; 8])),),  // int64
+        0x0d => format!("{}UL", u64::from_le_bytes(blob[..8.min(blob.len())].try_into().unwrap_or([0; 8])),), // uint64
+        0x0e => format!("{}f", f32::from_le_bytes(blob[..4.min(blob.len())].try_into().unwrap_or([0, 0, 0, 0])),), // float32
+        0x0f => f64::from_le_bytes(blob[..8.min(blob.len())].try_into().unwrap_or([0; 8])).to_string(), // float64
+        _ => "0".into(),
     }
 }
 
