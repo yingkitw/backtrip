@@ -1,6 +1,6 @@
 [package]
 name = "backtrip"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A .NET IL decompiler and CIL disassembler written in Rust — converts .NET assemblies (.dll/.exe) back to readable C# source code or IL disassembly"
 license = "Apache-2.0"
@@ -16,6 +16,7 @@ categories = [
     "development-tools",
     "parser-implementations",
 ]
+authors = ["Ying Kit WONG"]
 repository = "https://github.com/yingkitw/backtrip"
 homepage = "https://github.com/yingkitw/backtrip"
 documentation = "https://docs.rs/backtrip"

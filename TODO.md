@@ -60,7 +60,12 @@
 - [x] Reconstruct `lock` blocks from `Monitor.Enter/Exit`
 - [x] Reconstruct auto-properties from compiler-generated backing fields
 - [x] Reconstruct `string.Concat` chains back to `+` operators
-- [x] Reconstruct collection initializers, object initializers
+- [x] Reconstruct collection initializers (`new List() { ... }`)
+- [x] Render `static` on static field declarations
+- [x] Strip generic arity backticks from class declarations (`Box`1` → `Box`)
+- [ ] Reconstruct object initializers (`new T() { Prop = v }` collapse)
+- [ ] Render generic parameters by name (`T`/`U`) instead of index-based `T0`/`!!0`
+- [ ] Strip namespace prefixes from same-namespace base classes (`Circle : Shapes.Shape` → `Circle : Shape`)
 
 ## Next — async / closures / state machines
 

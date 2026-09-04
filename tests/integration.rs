@@ -561,6 +561,171 @@ fn decompiles_constructor() {
 }
 
 #[test]
+fn decompiles_abstract_class_hierarchy() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+
+    let shape = types
+        .iter()
+        .find(|t| t.file_name.ends_with("_Shape.cs"))
+        .expect("Shape file");
+    assert!(shape.source.contains("public abstract class Shape"),
+        "abstract class missing;\n{}", shape.source);
+    assert!(shape.source.contains("public abstract double Area();"),
+        "abstract method missing;\n{}", shape.source);
+    assert!(shape.source.contains("public virtual string Describe()"),
+        "virtual method missing;\n{}", shape.source);
+
+    let circle = types
+        .iter()
+        .find(|t| t.file_name.ends_with("_Circle.cs"))
+        .expect("Circle file");
+    assert!(circle.source.contains("public class Circle : Shapes.Shape"),
+        "base class missing;\n{}", circle.source);
+    assert!(circle.source.contains("public Circle(double r)"),
+        "Circle ctor missing;\n{}", circle.source);
+    assert!(circle.source.contains("public override double Area()"),
+        "override method missing;\n{}", circle.source);
+    assert!(circle.source.contains("public override string Describe()"),
+        "override Describe missing;\n{}", circle.source);
+}
+
+#[test]
+fn decompiles_interface_type() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let iface = types
+        .iter()
+        .find(|t| t.file_name.contains("IResettable"))
+        .expect("IResettable file");
+    assert!(iface.source.contains("public interface IResettable"),
+        "interface declaration missing;\n{}", iface.source);
+    assert!(iface.source.contains("void Reset();"),
+        "interface method missing;\n{}", iface.source);
+}
+
+#[test]
+fn decompiles_generic_class_and_method() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let box_ = types
+        .iter()
+        .find(|t| t.file_name.contains("Box"))
+        .expect("Box file");
+    // Class-level generic params render from the GenericParam table names.
+    assert!(box_.source.contains("public class Box<T>"),
+        "generic class missing;\n{}", box_.source);
+    // Class generic params appear as T0 in member signatures (index-based).
+    assert!(box_.source.contains("public T0 Item;"),
+        "generic field missing;\n{}", box_.source);
+    assert!(box_.source.contains("public Box(T0 item)"),
+        "generic ctor missing;\n{}", box_.source);
+    assert!(box_.source.contains("public T0 Get()"),
+        "generic method return missing;\n{}", box_.source);
+    // Method-level generic: <U> decl + !!0 in the signature.
+    assert!(box_.source.contains("public !!0 Map<U>(Func<T0, !!0> f)"),
+        "generic method signature missing;\n{}", box_.source);
+    assert!(box_.source.contains("f.Invoke(this.Item)"),
+        "delegate invocation missing;\n{}", box_.source);
+    // No raw arity backticks anywhere in the rendered source.
+    assert!(!box_.source.contains('`'),
+        "generic arity backtick should be stripped;\n{}", box_.source);
+}
+
+#[test]
+fn decompiles_static_constructor_and_field() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let logger = types
+        .iter()
+        .find(|t| t.file_name.contains("Logger"))
+        .expect("Logger file");
+    assert!(logger.source.contains("public static int InstanceCount;"),
+        "static field missing;\n{}", logger.source);
+    assert!(logger.source.contains("static Logger()"),
+        "static ctor missing;\n{}", logger.source);
+    assert!(logger.source.contains("InstanceCount = 1;"),
+        "static ctor body missing;\n{}", logger.source);
+}
+
+#[test]
+fn decompiles_flags_enum() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let perms = types
+        .iter()
+        .find(|t| t.file_name.contains("Permissions"))
+        .expect("Permissions file");
+    assert!(perms.source.contains("[Flags]"),
+        "Flags attribute missing;\n{}", perms.source);
+    assert!(perms.source.contains("public enum Permissions : int"),
+        "enum declaration missing;\n{}", perms.source);
+    assert!(perms.source.contains("None = 0"),
+        "enum member None missing;\n{}", perms.source);
+    assert!(perms.source.contains("Read = 1"),
+        "enum member Read missing;\n{}", perms.source);
+    assert!(perms.source.contains("Write = 2"),
+        "enum member Write missing;\n{}", perms.source);
+}
+
+#[test]
+fn decompiles_array_operations() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // newarr → `new int[n]`
+    assert!(calc.source.contains("public int[] MakeArray(int n)"),
+        "array-returning method missing;\n{}", calc.source);
+    assert!(calc.source.contains("return new int[n];"),
+        "newarr missing;\n{}", calc.source);
+    // ldelem → `xs[0]`
+    assert!(calc.source.contains("public int FirstElement(int[] xs)"),
+        "array param method missing;\n{}", calc.source);
+    assert!(calc.source.contains("return xs[0];"),
+        "ldelem missing;\n{}", calc.source);
+    // ldlen → `xs.Length`
+    assert!(calc.source.contains("public int ArrayLength(int[] xs)"),
+        "ldlen method missing;\n{}", calc.source);
+    assert!(calc.source.contains("xs.Length"),
+        "ldlen missing;\n{}", calc.source);
+}
+
+#[test]
+fn decompiles_boxing_and_casting() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // box → `(object)(x)`
+    assert!(calc.source.contains("public object BoxInt(int x)"),
+        "boxing method missing;\n{}", calc.source);
+    assert!(calc.source.contains("return (object)(x);"),
+        "box missing;\n{}", calc.source);
+    // unbox.any → `(int)(o)`
+    assert!(calc.source.contains("public int UnboxInt(object o)"),
+        "unboxing method missing;\n{}", calc.source);
+    assert!(calc.source.contains("return (int)(o);"),
+        "unbox.any missing;\n{}", calc.source);
+    // castclass → `(string)(o)`
+    assert!(calc.source.contains("public string CastString(object o)"),
+        "cast method missing;\n{}", calc.source);
+    assert!(calc.source.contains("return (string)(o);"),
+        "castclass missing;\n{}", calc.source);
+}
+
+#[test]
 fn cil_decoder_round_trip_sizes() {
     // A tiny method body: ldarg.1, ldarg.2, add, ret.
     let code = [0x03_u8, 0x04, 0x58, 0x2A];

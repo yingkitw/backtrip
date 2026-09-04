@@ -182,6 +182,36 @@ namespace Shapes
             return list;
         }
 
+        public int[] MakeArray(int n)
+        {
+            return new int[n];
+        }
+
+        public int FirstElement(int[] xs)
+        {
+            return xs[0];
+        }
+
+        public int ArrayLength(int[] xs)
+        {
+            return xs.Length;
+        }
+
+        public object BoxInt(int x)
+        {
+            return x;
+        }
+
+        public int UnboxInt(object o)
+        {
+            return (int)o;
+        }
+
+        public string CastString(object o)
+        {
+            return (string)o;
+        }
+
         public string DescribeObject(object obj)
         {
             if (obj is string s)
@@ -259,5 +289,50 @@ namespace Shapes
 
         [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)]
         public static extern int getpid();
+    }
+
+    public abstract class Shape
+    {
+        public abstract double Area();
+        public virtual string Describe() { return "shape"; }
+    }
+
+    public class Circle : Shape
+    {
+        public double Radius;
+
+        public Circle(double r) { Radius = r; }
+
+        public override double Area() { return Radius * Radius * 3.14159; }
+
+        public override string Describe() { return "circle"; }
+    }
+
+    public class Box<T>
+    {
+        public T Item;
+
+        public Box(T item) { Item = item; }
+
+        public T Get() { return Item; }
+
+        public U Map<U>(System.Func<T, U> f) { return f(Item); }
+    }
+
+    public class Logger
+    {
+        public static int InstanceCount;
+
+        static Logger() { InstanceCount = 1; }
+
+        public void Log(string msg) { }
+    }
+
+    [System.Flags]
+    public enum Permissions
+    {
+        None = 0,
+        Read = 1,
+        Write = 2
     }
 }

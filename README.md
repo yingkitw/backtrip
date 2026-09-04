@@ -47,7 +47,6 @@ dependencies.
 - **`using` blocks** — detected from `try`/`finally` + `Dispose()` pattern
 - **`foreach` loops** — detected from `GetEnumerator` + `MoveNext` + `Current` pattern
 - **Collection initializers** — `new List()` + `.Add()` calls collapsed to `{ ... }`
-- **Object initializers** — `new Type()` + field assignments collapsed to `{ ... }`
 
 ### Tooling & Analysis
 
@@ -153,7 +152,22 @@ cargo test
 The integration tests build a small C# fixture (`tests/fixtures/Sample.cs`)
 using the .NET SDK (version 8+) and assert the decompiler reproduces expected
 C# fragments — including control flow, switch statements, switch expressions,
-try/catch, using blocks, foreach, properties, and more.
+try/catch, using blocks, foreach, properties, events, delegates, nested types,
+enums, interfaces, abstract/virtual/override hierarchies, generic classes and
+methods, static constructors, arrays, and box/unbox/castclass conversions.
+
+## Library Usage
+
+backtrip is a library as well as a CLI. The
+[`examples/decompile.rs`](examples/decompile.rs) example shows the minimal
+pipeline — parse PE, load metadata, decompile:
+
+```bash
+cargo run --example decompile -- path/to/Assembly.dll
+```
+
+The same functions (`PeImage::parse`, `metadata::load`, `Reader::new`,
+`decompile_assembly`) power the CLI and the integration tests.
 
 ## How It Works
 
@@ -195,6 +209,8 @@ See [`TODO.md`](TODO.md) for the full roadmap. Notable upcoming work:
 - `yield` iterator state-machine reversal
 - Lambda / closure full inlining (display class → lambda expression)
 - Switch expressions with type patterns and property patterns
+- Object initializers (`new T() { Prop = v }` collapse)
+- Generic parameters rendered by name (`T`/`U`) instead of index-based `T0`/`!!0`
 - Full round-trip verification (recompile + IL diff)
 
 ## License

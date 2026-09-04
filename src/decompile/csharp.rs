@@ -240,7 +240,8 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
                 .unwrap_or_else(|| "default".into());
             s.push_str(&format!("    {} const {} {} = {};\n", field_access(fflags), ftype, fname, value));
         } else {
-            s.push_str(&format!("    {} {} {};\n", field_access(fflags), ftype, fname));
+            let fmod = if fflags & 0x0010 != 0 { "static " } else { "" };
+            s.push_str(&format!("    {} {}{} {};\n", field_access(fflags), fmod, ftype, fname));
         }
     }
     if has_fields {
@@ -1826,6 +1827,10 @@ fn clean_display_class_name(name: &str) -> String {
             let suffix = &name[pos + 3..];
             return format!("lambda_{suffix}");
         }
+    }
+    // Strip generic arity backtick: `Box`1` → `Box`.
+    if let Some(pos) = name.find('`') {
+        return name[..pos].to_string();
     }
     name.to_string()
 }
