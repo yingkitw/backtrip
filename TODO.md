@@ -27,22 +27,24 @@
 - [x] Static constants / `const` fields (Literal flag + Constant table)
 - [x] Delegate types (`MulticastDelegate` base → `delegate` declaration)
 - [x] Properties (PropertyMap / Property / MethodSemantics → getter/setter)
+- [x] Events (EventMap / Event / MethodSemantics → add/remove/raise)
+- [x] Custom attributes (CustomAttribute table → `[Attr(...)]`) — type-level, no args yet
+- [x] Explicit interface implementations (MethodImpl)
+- [x] P/Invoke (ImplMap / ModuleRef → `extern`)
+- [x] Default parameter values (Param HasDefault flag + Constant table)
+- [x] `switch` blocks (CIL `switch` → C# `switch`)
+- [x] Custom attributes on methods/fields (not just types)
+- [x] `try`/`catch`/`finally`/`fault` from exception regions (method section
+      headers: EHCOR, fat sections)
+- [x] Custom attribute constructor arguments (parse Value blob → `[Attr(...)]`)
 
 ## Next — control flow
 
-- [ ] Structured control-flow recovery: reconstruct `if`/`else`, `while`,
-      `for`, `do`/`while` from branch graphs instead of `goto` labels
-- [ ] `switch` blocks (CIL `switch` → C# `switch`)
-- [ ] `try`/`catch`/`finally`/`fault` from exception regions (method section
-      headers: EHCOR, fat sections)
+- [x] Structured control-flow recovery: `if`/`else` from conditional branches
+- [ ] `while`/`for`/`do`-`while` loop reconstruction from back-edges
 
 ## Next — language features
 
-- [ ] Events (EventMap / Event / MethodSemantics → add/remove/raise)
-- [ ] Custom attributes (CustomAttribute table → `[Attr(...)]`)
-- [ ] Explicit interface implementations (MethodImpl)
-- [ ] P/Invoke (ImplMap / ModuleRef → `extern`)
-- [ ] Default parameter values
 - [ ] `params` / `vararg` calling conventions
 
 ## Next — decompiler quality

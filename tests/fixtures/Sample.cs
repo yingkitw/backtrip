@@ -2,11 +2,13 @@ using System;
 
 namespace Shapes
 {
+    [System.Obsolete("Use NewCalculator instead.")]
     public class Calculator
     {
         public int Value;
         public const int MaxValue = 100;
         public string Label { get; set; }
+        public event Notify OnCalculating;
 
         public Calculator(int value)
         {
@@ -28,6 +30,11 @@ namespace Shapes
         public int Add(int a, int b)
         {
             return a + b;
+        }
+
+        public int Add(int a, int b, int c = 0)
+        {
+            return a + b + c;
         }
 
         public int Multiply(int a, int b)
@@ -54,6 +61,55 @@ namespace Shapes
         {
             return x * x;
         }
+
+        public string Classify(int day)
+        {
+            switch (day)
+            {
+                case 0: return "Sunday";
+                case 1: return "Monday";
+                case 2: return "Tuesday";
+                case 3: return "Wednesday";
+                case 4: return "Thursday";
+                case 5: return "Friday";
+                case 6: return "Saturday";
+                default: return "Unknown";
+            }
+        }
+
+        public int SafeParse(string input)
+        {
+            try
+            {
+                return int.Parse(input);
+            }
+            catch (System.FormatException)
+            {
+                return -1;
+            }
+        }
+
+        public int Abs(int x)
+        {
+            if (x < 0)
+            {
+                return -x;
+            }
+            return x;
+        }
+
+        public int Sign(int x)
+        {
+            if (x > 0)
+            {
+                return 1;
+            }
+            else if (x < 0)
+            {
+                return -1;
+            }
+            return 0;
+        }
     }
 
     public struct Point
@@ -77,4 +133,29 @@ namespace Shapes
     }
 
     public delegate void Notify(string message);
+
+    public interface IResettable
+    {
+        void Reset();
+    }
+
+    public class Counter : IResettable
+    {
+        [System.Obsolete]
+        public int Count;
+
+        [System.Obsolete("Use IncrementBy instead.")]
+        public void Increment()
+        {
+            Count++;
+        }
+
+        void IResettable.Reset()
+        {
+            Count = 0;
+        }
+
+        [System.Runtime.InteropServices.DllImport("libc", SetLastError = true)]
+        public static extern int getpid();
+    }
 }

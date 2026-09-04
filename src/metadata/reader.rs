@@ -18,6 +18,18 @@ pub struct MethodBody {
     pub max_stack: u32,
     pub local_token: u32,
     pub init_locals: bool,
+    pub exceptions: Vec<ExceptionHandler>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExceptionHandler {
+    pub flags: u32,       // 0=catch, 1=filter, 2=finally, 3=fault
+    pub try_offset: u32,
+    pub try_length: u32,
+    pub handler_offset: u32,
+    pub handler_length: u32,
+    pub class_token: u32, // TypeRef/TypeDef token for catch type (0 for finally/fault)
+    pub filter_offset: u32, // For filter handlers
 }
 
 impl<'a> Reader<'a> {
@@ -105,6 +117,20 @@ impl<'a> Reader<'a> {
         None
     }
 
+    /// Look up the Constant table row for a given Param (1-based row index).
+    /// Returns `(type_code, value_bytes)`.
+    pub fn constant_for_param(&self, param_row: u32) -> Option<(u8, &[u8])> {
+        for r in self.tables.get(tbl::CONSTANT) {
+            let parent = decode_coded(Coded::HasConstant, r.col(2));
+            if parent.table == Some(tbl::PARAM) && parent.row == param_row {
+                let type_code = r.col(0) as u8;
+                let blob = self.blob(r.col(3));
+                return Some((type_code, blob));
+            }
+        }
+        None
+    }
+
     // ---- Param ----
     pub fn param_name(&self, row: &crate::metadata::tables::Row) -> String {
         self.string(row.col(2))
@@ -161,6 +187,249 @@ impl<'a> Reader<'a> {
         None
     }
 
+    // ---- P/Invoke ----
+
+    /// Returns P/Invoke info for a MethodDef row: `(dll_name, import_name)`.
+    /// `method_row` is 1-based.
+    pub fn pinvoke_info(&self, method_row: u32) -> Option<(String, String)> {
+        for im in self.tables.get(tbl::IMPLMAP) {
+            let member = decode_coded(Coded::MemberForwarded, im.col(1));
+            if member.table == Some(tbl::METHODDEF) && member.row == method_row {
+                let import_name = self.string(im.col(2));
+                let module_ref = self.tables.get(tbl::MODULEREF).get(im.col(3) as usize - 1)?;
+                let dll_name = self.string(module_ref.col(0));
+                return Some((dll_name, import_name));
+            }
+        }
+        None
+    }
+
+    // ---- Explicit interface implementations ----
+
+    /// Returns explicit interface impls for a type:
+    /// `(method_body_0based_row, interface_type_name, interface_method_name)`.
+    pub fn explicit_impls_for_type(&self, type_row: u32) -> Vec<(usize, String, String)> {
+        let mut out = Vec::new();
+        for mi in self.tables.get(tbl::METHODIMPL) {
+            if mi.col(0) != type_row {
+                continue;
+            }
+            // MethodBody (col 1): the implementing method (MethodDef or MemberRef).
+            let body_ci = decode_coded(Coded::MethodDefOrRef, mi.col(1));
+            // MethodDeclaration (col 2): the interface method being implemented.
+            let decl_ci = decode_coded(Coded::MethodDefOrRef, mi.col(2));
+            // Only handle MethodDef bodies (the implementing method is in this assembly).
+            if body_ci.table != Some(tbl::METHODDEF) {
+                continue;
+            }
+            let body_row = body_ci.row as usize - 1; // 0-based
+            // Resolve the declaration to get interface type name + method name.
+            let (iface_name, method_name) = match decl_ci.table {
+                Some(tbl::METHODDEF) => {
+                    // Same-assembly interface method.
+                    let m = match self.tables.get(tbl::METHODDEF).get(decl_ci.row as usize - 1) {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    let mname = self.method_name(m);
+                    // Find the owner type via MethodList range scan.
+                    let mut owner_name = String::new();
+                    let type_defs = self.tables.get(tbl::TYPEDEF);
+                    for (i, td) in type_defs.iter().enumerate() {
+                        let start = td.col(5) as u32;
+                        let next = type_defs.get(i + 1).map(|r| r.col(5) as u32)
+                            .unwrap_or_else(|| self.tables.row_count(tbl::METHODDEF) as u32 + 1);
+                        if decl_ci.row >= start && decl_ci.row < next {
+                            owner_name = self.type_def_name(td);
+                            break;
+                        }
+                    }
+                    (owner_name, mname)
+                }
+                Some(tbl::MEMBERREF) => {
+                    // External interface method (referenced via MemberRef).
+                    let mr = match self.tables.get(tbl::MEMBERREF).get(decl_ci.row as usize - 1) {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    let mname = self.member_ref_name(mr);
+                    let parent = self.member_ref_parent(mr);
+                    let iface = self.type_def_or_ref_name(parent);
+                    (iface, mname)
+                }
+                _ => continue,
+            };
+            out.push((body_row, iface_name, method_name));
+        }
+        out
+    }
+
+    // ---- Custom attributes ----
+
+    /// Returns attribute type names for a given metadata entity (table, row).
+    /// `row` is 1-based. Only the attribute type name is returned; constructor
+    /// arguments are not yet parsed.
+    pub fn custom_attributes_for(&self, table: u8, row: u32) -> Vec<String> {
+        let mut out = Vec::new();
+        for ca in self.tables.get(tbl::CUSTOMATTRIBUTE) {
+            let parent = decode_coded(Coded::HasCustomAttribute, ca.col(0));
+            if parent.table == Some(table) && parent.row == row {
+                let ctor_ci = decode_coded(Coded::CustomAttributeType, ca.col(1));
+                if let Some(name) = self.attribute_type_name(ctor_ci) {
+                    out.push(name);
+                }
+            }
+        }
+        out
+    }
+
+    /// Returns `(attribute_type_name, formatted_args)` for a given entity.
+    /// `formatted_args` is a string like `"\"msg\", true"` or empty if no
+    /// constructor arguments.
+    pub fn custom_attributes_with_args_for(&self, table: u8, row: u32) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for ca in self.tables.get(tbl::CUSTOMATTRIBUTE) {
+            let parent = decode_coded(Coded::HasCustomAttribute, ca.col(0));
+            if parent.table != Some(table) || parent.row != row {
+                continue;
+            }
+            let ctor_ci = decode_coded(Coded::CustomAttributeType, ca.col(1));
+            let Some(name) = self.attribute_type_name(ctor_ci) else { continue };
+            let val = self.blob(ca.col(2));
+            let args = self.parse_attr_args(ctor_ci, val);
+            out.push((name, args));
+        }
+        out
+    }
+
+    /// Parse the Value blob of a CustomAttribute into a formatted args string.
+    /// Format (ECMA-335 II.23.3): prolog (01 00), fixed args per ctor sig,
+    /// NumNamed (u16), named args.
+    fn parse_attr_args(&self, ctor: CodedIndex, val: &[u8]) -> String {
+        if val.len() < 2 || val[0] != 0x01 || val[1] != 0x00 {
+            return String::new();
+        }
+        // Get the constructor's parameter types.
+        let param_types = match ctor.table {
+            Some(tbl::METHODDEF) => {
+                let m = match self.tables.get(tbl::METHODDEF).get(ctor.row as usize - 1) {
+                    Some(r) => r,
+                    None => return String::new(),
+                };
+                match self.method_sig(m) {
+                    Ok(sig) => sig.param_types,
+                    Err(_) => return String::new(),
+                }
+            }
+            Some(tbl::MEMBERREF) => {
+                let mr = match self.tables.get(tbl::MEMBERREF).get(ctor.row as usize - 1) {
+                    Some(r) => r,
+                    None => return String::new(),
+                };
+                match self.member_ref_sig(mr) {
+                    Ok(sig) => sig.param_types,
+                    Err(_) => return String::new(),
+                }
+            }
+            _ => return String::new(),
+        };
+
+        let mut pos = 2; // skip prolog
+        let mut args: Vec<String> = Vec::new();
+
+        for pt in &param_types {
+            match self.parse_attr_value(val, &mut pos, pt) {
+                Some(s) => args.push(s),
+                None => return String::new(),
+            }
+        }
+
+        // Skip named args (NumNamed u16 + each named arg).
+        // We don't render named args yet.
+
+        args.join(", ")
+    }
+
+    /// Parse a single attribute argument value from the blob at `pos`.
+    fn parse_attr_value(&self, val: &[u8], pos: &mut usize, t: &crate::metadata::signatures::Type) -> Option<String> {
+        use crate::metadata::signatures::Type;
+        match t {
+            Type::String => {
+                // SerString: compressed length + UTF-8 bytes. Null = 0xFF.
+                if *pos >= val.len() { return None; }
+                let b = val[*pos];
+                if b == 0xFF {
+                    *pos += 1;
+                    return Some("null".into());
+                }
+                let (len, len_bytes) = crate::metadata::streams::decode_compressed_uint(&val[*pos..]).ok()?;
+                *pos += len_bytes;
+                let end = *pos + len as usize;
+                if end > val.len() { return None; }
+                let s = std::str::from_utf8(&val[*pos..end]).ok()?;
+                *pos = end;
+                Some(format!("\"{}\"", s))
+            }
+            Type::I4 => {
+                if *pos + 4 > val.len() { return None; }
+                let n = i32::from_le_bytes([val[*pos], val[*pos+1], val[*pos+2], val[*pos+3]]);
+                *pos += 4;
+                Some(n.to_string())
+            }
+            Type::I8 => {
+                if *pos + 8 > val.len() { return None; }
+                let n = i64::from_le_bytes(val[*pos..*pos+8].try_into().ok()?);
+                *pos += 8;
+                Some(format!("{}L", n))
+            }
+            Type::Bool => {
+                if *pos >= val.len() { return None; }
+                let b = val[*pos] != 0;
+                *pos += 1;
+                Some(b.to_string())
+            }
+            _ => {
+                // Unknown type — skip parsing, return None to signal failure.
+                None
+            }
+        }
+    }
+
+    /// Resolve an attribute constructor (MethodDef or MemberRef) to its
+    /// declaring type name.
+    fn attribute_type_name(&self, ctor: CodedIndex) -> Option<String> {
+        match ctor.table {
+            Some(tbl::METHODDEF) => {
+                // The constructor's declaring type is in the MethodDef's
+                // owner TypeDef. Find it by scanning TypeDef MethodList.
+                let m_row = ctor.row;
+                let type_defs = self.tables.get(tbl::TYPEDEF);
+                for (i, td) in type_defs.iter().enumerate() {
+                    let start = td.col(5) as u32;
+                    let next = type_defs.get(i + 1).map(|r| r.col(5) as u32)
+                        .unwrap_or_else(|| self.tables.row_count(tbl::METHODDEF) as u32 + 1);
+                    if m_row >= start && m_row < next {
+                        let name = self.type_def_name(td);
+                        return Some(name);
+                    }
+                }
+                None
+            }
+            Some(tbl::MEMBERREF) => {
+                let mr = self.tables.get(tbl::MEMBERREF).get(ctor.row as usize - 1)?;
+                let parent = self.member_ref_parent(mr);
+                // MemberRefParent is a TypeRef/TypeDef/TypeSpec.
+                match parent.table {
+                    Some(tbl::TYPEREF) | Some(tbl::TYPEDEF) | Some(tbl::TYPESPEC) => {
+                        Some(self.type_def_or_ref_name(parent))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     // ---- Properties ----
 
     /// Returns property info for a type: (name, type, getter_method_row, setter_method_row).
@@ -210,6 +479,57 @@ impl<'a> Reader<'a> {
                 }
             }
             out.push((name, ptype, getter, setter));
+        }
+        out
+    }
+
+    // ---- Events ----
+
+    /// Returns event info for a type: (name, event_type_name, add_method_row, remove_method_row).
+    /// Method rows are 0-based indices into the METHODDEF table.
+    pub fn events_for_type(&self, type_row: u32) -> Vec<(String, String, Option<usize>, Option<usize>)> {
+        let mut out = Vec::new();
+        // Find EventMap rows for this type.
+        let mut evt_start = 0u32;
+        let mut evt_end = 0u32;
+        for (i, r) in self.tables.get(tbl::EVENTMAP).iter().enumerate() {
+            if r.col(0) == type_row {
+                evt_start = r.col(1);
+                let next = self.tables.get(tbl::EVENTMAP).get(i + 1)
+                    .map(|r| r.col(1))
+                    .unwrap_or_else(|| self.tables.row_count(tbl::EVENT) + 1);
+                evt_end = next;
+                break;
+            }
+        }
+        if evt_start == 0 && evt_end == 0 {
+            return out;
+        }
+        // For each Event row in range, find add/remove via MethodSemantics.
+        for evt_row in evt_start..evt_end {
+            let evt = match self.tables.get(tbl::EVENT).get(evt_row as usize - 1) {
+                Some(r) => r,
+                None => continue,
+            };
+            let name = self.string(evt.col(1));
+            let evt_type_ci = decode_coded(Coded::TypeDefOrRef, evt.col(2));
+            let evt_type_name = self.type_def_or_ref_name(evt_type_ci);
+            let mut add: Option<usize> = None;
+            let mut remove: Option<usize> = None;
+            for ms in self.tables.get(tbl::METHODSEMANTICS) {
+                let parent = decode_coded(Coded::HasSemantics, ms.col(2));
+                if parent.table == Some(tbl::EVENT) && parent.row == evt_row {
+                    let sem = ms.col(0) as u16;
+                    let method_row = ms.col(1) as usize - 1;
+                    if sem & 0x0008 != 0 {
+                        add = Some(method_row);
+                    }
+                    if sem & 0x0010 != 0 {
+                        remove = Some(method_row);
+                    }
+                }
+            }
+            out.push((name, evt_type_name, add, remove));
         }
         out
     }
@@ -343,26 +663,101 @@ impl<'a> Reader<'a> {
                 max_stack: 8,
                 local_token: 0,
                 init_locals: false,
+                exceptions: Vec::new(),
             }))
         } else if header_byte & 0x03 == 0x03 {
             // Fat header: 12 bytes
             if off + 12 > d.len() {
                 return Err(Error::InvalidCil("fat header truncated".into()));
             }
-            let _flags_size = u16::from_le_bytes([d[off], d[off + 1]]);
+            let flags_size = u16::from_le_bytes([d[off], d[off + 1]]);
             let max_stack = u16::from_le_bytes([d[off + 2], d[off + 3]]) as u32;
             let code_size = u32::from_le_bytes([d[off + 4], d[off + 5], d[off + 6], d[off + 7]]) as usize;
             let local_token = u32::from_le_bytes([d[off + 8], d[off + 9], d[off + 10], d[off + 11]]);
             let init_locals = header_byte & 0x10 != 0;
+            let more_sections = header_byte & 0x08 != 0;
             let code_off = off + 12;
             if code_off + code_size > d.len() {
                 return Err(Error::InvalidCil("fat method body truncated".into()));
             }
+            let code = d[code_off..code_off + code_size].to_vec();
+
+            // Parse exception handling sections if present.
+            let mut exceptions = Vec::new();
+            if more_sections {
+                let mut sec_off = code_off + code_size;
+                // Align to 4-byte boundary
+                sec_off = (sec_off + 3) & !3;
+                while sec_off < d.len() {
+                    let kind = d[sec_off];
+                    let is_fat = kind & 0x40 != 0;
+                    let is_ehc = kind & 0x01 != 0;
+                    if !is_ehc {
+                        break;
+                    }
+                    let (data_size, clause_size, clauses_off) = if is_fat {
+                        // Fat section header: 4 bytes (kind + 3-byte data size)
+                        let ds = u32::from_le_bytes([0, d[sec_off + 1], d[sec_off + 2], d[sec_off + 3]]);
+                        (ds, 24usize, sec_off + 4)
+                    } else {
+                        // Small section header: 4 bytes (kind + 3x data size)
+                        let ds = d[sec_off + 1] as u32;
+                        (ds, 12usize, sec_off + 4)
+                    };
+                    let clause_count = ((data_size - 4) / clause_size as u32) as usize;
+                    for c in 0..clause_count {
+                        let co = clauses_off + c * clause_size;
+                        if co + clause_size > d.len() {
+                            break;
+                        }
+                        let (flags, try_off, try_len, h_off, h_len, token) = if is_fat {
+                            (
+                                u32::from_le_bytes([d[co], d[co+1], d[co+2], d[co+3]]),
+                                u32::from_le_bytes([d[co+4], d[co+5], d[co+6], d[co+7]]),
+                                u32::from_le_bytes([d[co+8], d[co+9], d[co+10], d[co+11]]),
+                                u32::from_le_bytes([d[co+12], d[co+13], d[co+14], d[co+15]]),
+                                u32::from_le_bytes([d[co+16], d[co+17], d[co+18], d[co+19]]),
+                                u32::from_le_bytes([d[co+20], d[co+21], d[co+22], d[co+23]]),
+                            )
+                        } else {
+                            (
+                                u16::from_le_bytes([d[co], d[co+1]]) as u32,
+                                u16::from_le_bytes([d[co+2], d[co+3]]) as u32,
+                                d[co+4] as u32,
+                                u16::from_le_bytes([d[co+5], d[co+6]]) as u32,
+                                d[co+7] as u32,
+                                u32::from_le_bytes([d[co+8], d[co+9], d[co+10], d[co+11]]),
+                            )
+                        };
+                        let filter_offset = if flags == 1 { token } else { 0 };
+                        exceptions.push(ExceptionHandler {
+                            flags,
+                            try_offset: try_off,
+                            try_length: try_len,
+                            handler_offset: h_off,
+                            handler_length: h_len,
+                            class_token: if flags == 1 { 0 } else { token },
+                            filter_offset,
+                        });
+                    }
+                    // Move to next section
+                    sec_off = clauses_off - 4 + data_size as usize;
+                    // Align to 4-byte boundary
+                    sec_off = (sec_off + 3) & !3;
+                    if !is_fat {
+                        // Small sections are always the last section
+                        break;
+                    }
+                }
+            }
+
+            let _ = flags_size;
             Ok(Some(MethodBody {
-                code: d[code_off..code_off + code_size].to_vec(),
+                code,
                 max_stack,
                 local_token,
                 init_locals,
+                exceptions,
             }))
         } else {
             Err(Error::InvalidCil(format!("unknown method header byte {header_byte:#x}")))

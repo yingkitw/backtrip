@@ -112,6 +112,11 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
     if !ns.is_empty() {
         s.push_str(&format!("namespace {ns};\n\n"));
     }
+    // Custom attributes on the type.
+    let type_attrs = reader.custom_attributes_with_args_for(tbl::TYPEDEF, row_idx);
+    for (name, args) in &type_attrs {
+        s.push_str(&format!("    {}\n", format_attr_line(name, args)));
+    }
     let mut keywords = Vec::new();
     if !access.is_empty() {
         keywords.push(access.to_string());
@@ -163,7 +168,7 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
     for ir in reader.tables.get(tbl::INTERFACEIMPL) {
         if ir.col(0) == row_idx {
             let iface = decode_coded(Coded::TypeDefOrRef, ir.col(1));
-            bases.push(reader.type_def_or_ref_name(iface));
+            bases.push(simple_name(&strip_system(&reader.type_def_or_ref_name(iface))));
         }
     }
     if !bases.is_empty() {
@@ -206,6 +211,9 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
         s.push_str("}\n");
         return Ok(s);
     }
+    // Collect event names to skip their backing fields.
+    let events = reader.events_for_type(row_idx);
+    let event_names: std::collections::HashSet<String> = events.iter().map(|(n, _, _, _)| n.clone()).collect();
     for fi in field_range {
         let f = &reader.tables.get(tbl::FIELD)[fi];
         let fname = reader.field_name(f);
@@ -213,8 +221,17 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
             // Compiler-generated backing field; skip in output.
             continue;
         }
+        // Skip event backing fields (private field with same name as the event).
+        if event_names.contains(&fname) {
+            continue;
+        }
         let fflags = reader.field_flags(f);
         let ftype = reader.field_type(f).map(|t| reader.type_name(&t)).unwrap_or_else(|_| "object".into());
+        // Field-level custom attributes.
+        let field_attrs = reader.custom_attributes_with_args_for(tbl::FIELD, fi as u32 + 1);
+        for (name, args) in &field_attrs {
+            s.push_str(&format!("    {}\n", format_attr_line(name, args)));
+        }
         // Literal + Static flags => C# `const` with a value from the Constant table.
         if fflags & 0x0040 != 0 {
             let value = reader
@@ -255,14 +272,36 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
         s.push('\n');
     }
 
-    // Methods (skip property getter/setter methods).
+    // Events.
+    let mut event_methods: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (ename, evt_type, add, remove) in &events {
+        if let Some(a) = add { event_methods.insert(*a); }
+        if let Some(r) = remove { event_methods.insert(*r); }
+        let access_str = if let Some(a) = add {
+            let m = &reader.tables.get(tbl::METHODDEF)[*a];
+            method_access(reader.method_flags(m))
+        } else {
+            "public"
+        };
+        s.push_str(&format!("    {} event {} {};\n", access_str, simple_name(&strip_system(evt_type)), ename));
+    }
+    if !events.is_empty() {
+        s.push('\n');
+    }
+
+    // Methods (skip property getter/setter and event add/remove methods).
+    // Explicit interface impls get a qualified name.
+    let explicit_impls = reader.explicit_impls_for_type(row_idx);
+    let explicit_map: std::collections::HashMap<usize, (String, String)> =
+        explicit_impls.iter().map(|(r, i, m)| (*r, (i.clone(), m.clone()))).collect();
     let method_range = reader.type_method_rows(row_idx);
     for mi in method_range {
-        if property_methods.contains(&mi) {
+        if property_methods.contains(&mi) || event_methods.contains(&mi) {
             continue;
         }
         let m = &reader.tables.get(tbl::METHODDEF)[mi];
-        let src = decompile_method(reader, m, (mi + 1) as u32, &name)?;
+        let explicit = explicit_map.get(&mi).map(|(i, m)| (i.as_str(), m.as_str()));
+        let src = decompile_method(reader, m, (mi + 1) as u32, &name, explicit)?;
         s.push_str(&src);
         s.push('\n');
     }
@@ -334,7 +373,12 @@ fn strip_system(n: &str) -> String {
     }
 }
 
-fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, method_row: u32, type_name: &str) -> Result<String> {
+/// Return the last segment of a dotted type name (e.g. "Shapes.Notify" → "Notify").
+fn simple_name(n: &str) -> String {
+    n.rsplit('.').next().unwrap_or(n).to_string()
+}
+
+fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, method_row: u32, type_name: &str, explicit: Option<(&str, &str)>) -> Result<String> {
     let flags = reader.method_flags(m);
     let name = reader.method_name(m);
     let sig = reader.method_sig(m)?;
@@ -344,6 +388,9 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
     let is_newslot = flags & 0x0100 != 0;
     let is_final = flags & 0x0020 != 0;
     let is_ctor = name == ".ctor" || name == ".cctor";
+    let is_explicit = explicit.is_some();
+    let is_pinvoke = flags & 0x2000 != 0;
+    let pinvoke = if is_pinvoke { reader.pinvoke_info(method_row) } else { None };
 
     let generics = reader.generic_params_for(CodedIndex { table: Some(tbl::METHODDEF), row: method_row });
     let generic_decl = if generics.is_empty() {
@@ -354,36 +401,66 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
     };
 
     let mut mods = Vec::new();
-    let acc = method_access(flags);
-    if !acc.is_empty() {
-        mods.push(acc.to_string());
+    if !is_explicit {
+        let acc = method_access(flags);
+        if !acc.is_empty() {
+            mods.push(acc.to_string());
+        }
+        if is_static {
+            mods.push("static".into());
+        }
+        if is_abstract {
+            mods.push("abstract".into());
+        } else if is_virtual && is_newslot {
+            mods.push("virtual".into());
+        } else if is_virtual && is_final {
+            mods.push("override".into());
+        } else if is_virtual {
+            // virtual without newslot: override
+            mods.push("override".into());
+        }
     }
-    if is_static {
-        mods.push("static".into());
-    }
-    if is_abstract {
-        mods.push("abstract".into());
-    } else if is_virtual && is_newslot {
-        mods.push("virtual".into());
-    } else if is_virtual && is_final {
-        mods.push("override".into());
-    } else if is_virtual {
-        // virtual without newslot: override
-        mods.push("override".into());
+    if is_pinvoke {
+        mods.push("extern".into());
     }
 
     let param_names = method_param_names(reader, method_row, &sig, is_static);
+    let param_rows = reader.method_param_rows(method_row);
+    let param_table = reader.tables.get(tbl::PARAM);
+    // Build a map: sequence -> (1-based param row index, flags) for default lookup.
+    let mut param_defaults: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
+    for (idx, r) in param_table[param_rows.clone()].iter().enumerate() {
+        let flags = reader.param_flags(r);
+        if flags & 0x1000 != 0 {
+            // The 1-based Param row index = param_rows.start + idx + 1.
+            let row_1based = (param_rows.start + idx) as u32 + 1;
+            param_defaults.insert(reader.param_sequence(r), row_1based);
+        }
+    }
     let params: Vec<String> = sig
         .param_types
         .iter()
         .enumerate()
         .map(|(i, t)| {
             let pname = param_names.get(i).cloned().unwrap_or_else(|| format!("arg{i}"));
+            let seq = (i + 1) as u16;
+            if let Some(&param_row) = param_defaults.get(&seq) {
+                if let Some((tc, blob)) = reader.constant_for_param(param_row) {
+                    let def = format_constant(tc, blob);
+                    return format!("{} {} = {}", reader.type_name(t), pname, def);
+                }
+            }
             format!("{} {}", reader.type_name(t), pname)
         })
         .collect();
 
     // Constructors render as `TypeName(args)` with no return type.
+    // Explicit interface impls render as `void IFoo.Bar(args)`.
+    let display_name = if let Some((iface, mname)) = explicit {
+        format!("{}.{}", simple_name(&strip_system(iface)), mname)
+    } else {
+        name.clone()
+    };
     let header = if is_ctor {
         format!("    {} {}{}({})",
             mods.join(" "),
@@ -396,7 +473,7 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
         format!("    {} {} {}{}({})",
             mods.join(" "),
             ret_type,
-            name,
+            display_name,
             generic_decl,
             params.join(", "),
         )
@@ -405,15 +482,35 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
     let rva = reader.method_rva(m);
     let body = reader.method_body(rva)?;
 
+    // Method-level custom attributes.
+    let method_attrs = reader.custom_attributes_with_args_for(tbl::METHODDEF, method_row);
+    let attr_prefix: String = method_attrs.iter()
+        .map(|(n, a)| format!("    {}\n", format_attr_line(n, a)))
+        .collect();
+
+    // P/Invoke methods have no body; emit [DllImport] + declaration.
+    if is_pinvoke {
+        let dll = pinvoke.as_ref().map(|(d, _)| d.as_str()).unwrap_or("unknown");
+        let import_name = pinvoke.as_ref().map(|(_, n)| n.as_str()).unwrap_or(&name);
+        // If the import name differs from the method name, use EntryPoint.
+        let entry = if import_name != name {
+            format!(", EntryPoint = \"{import_name}\"")
+        } else {
+            String::new()
+        };
+        return Ok(format!("{attr_prefix}    [DllImport(\"{dll}\"{entry})]\n{header};\n"));
+    }
+
     if is_abstract || body.is_none() {
-        return Ok(format!("{header};\n"));
+        return Ok(format!("{attr_prefix}{header};\n"));
     }
 
     let body = body.unwrap();
     let local_types = reader.local_types(body.local_token);
-    let body_src = decompile_body(reader, &body.code, &param_names, &local_types, &sig, is_static)?;
+    let body_src = decompile_body(reader, &body.code, &param_names, &local_types, &sig, is_static, &body.exceptions)?;
 
     let mut s = String::new();
+    s.push_str(&attr_prefix);
     s.push_str(&header);
     s.push_str("\n    {\n");
     s.push_str(&body_src);
@@ -459,6 +556,7 @@ fn decompile_body(
     local_types: &[Type],
     sig: &MethodSig,
     is_static: bool,
+    exceptions: &[crate::metadata::reader::ExceptionHandler],
 ) -> Result<String> {
     let instrs = decode(code)?;
     let targets = collect_targets(&instrs);
@@ -467,10 +565,18 @@ fn decompile_body(
     let mut out: Vec<String> = Vec::new();
     let local_names = local_type_names(local_types);
 
+    // Map IL offset -> output line index (for inserting try/catch markers).
+    let mut offset_to_line: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+
     for ins in &instrs {
         // Emit a label if this offset is a branch target.
         if targets.contains(&ins.offset) {
+            offset_to_line.insert(ins.offset, out.len());
             out.push(format!("        Label_{:04X}:", ins.offset));
+        }
+
+        if !offset_to_line.contains_key(&ins.offset) {
+            offset_to_line.insert(ins.offset, out.len());
         }
 
         if !handle_instr(reader, ins, &mut stack, &mut out, param_names, &local_names, sig, is_static)? {
@@ -480,13 +586,13 @@ fn decompile_body(
         }
     }
 
-    // If the method didn't end with an explicit return, add one.
-    if out.last().and_then(|l| l.trim().strip_prefix("return")).is_none() {
-        // Only if void return and stack empty.
-        if matches!(sig.ret_type, Type::Void) && stack.is_empty() {
-            // no-op
-        }
+    // Post-process: insert try/catch markers based on exception handlers.
+    if !exceptions.is_empty() {
+        insert_exception_markers(reader, &mut out, &offset_to_line, exceptions);
     }
+
+    // Post-process: restructure if/else from conditional branches.
+    restructure_if_else(&mut out);
 
     let mut s = String::new();
     // Local declarations.
@@ -506,6 +612,196 @@ fn decompile_body(
 
 fn local_type_names(local_types: &[Type]) -> Vec<String> {
     (0..local_types.len()).map(|i| format!("V_{i}")).collect()
+}
+
+/// Negate a comparison operator for if/else restructuring.
+/// `if (a >= b) goto L;` → `if (a < b) { ... }`
+fn negate_cond(cond: &str) -> String {
+    // cond is like "(a >= b)" — find the operator and flip it.
+    let ops = [(">=", "<="), ("<=", ">="), (">", "<"), ("<", ">"), ("==", "!="), ("!=", "==")];
+    for (a, b) in ops {
+        if cond.contains(a) {
+            return cond.replacen(a, b, 1);
+        }
+    }
+    // No comparison operator found — wrap in `!(...)`.
+    format!("!{cond}")
+}
+
+/// Post-process the output lines to restructure `if (cond) goto Label;` + block
+/// + `Label:` into `if (!cond) { block }`.
+fn restructure_if_else(out: &mut Vec<String>) {
+    let mut i = 0;
+    while i < out.len() {
+        // Look for: `        if (cond) goto Label_XXXX;`
+        let line = &out[i];
+        let trimmed = line.trim();
+        if !trimmed.starts_with("if (") || !trimmed.contains(") goto Label_") {
+            i += 1;
+            continue;
+        }
+        // Extract the label name.
+        let label = match trimmed.rsplit("goto ").next() {
+            Some(s) => s.trim().trim_end_matches(';'),
+            None => { i += 1; continue; }
+        };
+        // Extract the condition (everything between "if (" and ") goto").
+        let cond_start = trimmed.find("if (").map(|p| p + 4).unwrap_or(0);
+        let cond_end = match trimmed[cond_start..].find(") goto") {
+            Some(p) => cond_start + p,
+            None => { i += 1; continue; }
+        };
+        let cond = format!("({})", &trimmed[cond_start..cond_end]);
+
+        // Find the label line (must be after the current line).
+        let label_pattern = format!("Label_{}:", label.trim_start_matches("Label_"));
+        let label_idx = out[i+1..].iter().position(|l| l.trim() == label_pattern);
+        let label_idx = match label_idx {
+            Some(p) => i + 1 + p,
+            None => { i += 1; continue; }
+        };
+
+        // The block between the if-line and the label is the "then" body.
+        // Check that the block is non-empty and ends with a return or goto.
+        if label_idx <= i + 1 {
+            i += 1;
+            continue;
+        }
+        let block_end = label_idx - 1;
+        let block_last = out[block_end].trim().to_string();
+        if !block_last.starts_with("return") && !block_last.starts_with("goto") {
+            i += 1;
+            continue;
+        }
+
+        // Check for else: if the block ends with `goto Label_YYYY;` and there's
+        // another block between the current label and Label_YYYY.
+        let has_else = block_last.starts_with("goto ");
+        let else_label = if has_else {
+            block_last.trim_start_matches("goto ").trim_end_matches(';').to_string()
+        } else {
+            String::new()
+        };
+
+        // Restructure: replace the if-line with `if (!cond) {`
+        let neg_cond = negate_cond(&cond);
+        out[i] = format!("        if {neg_cond} {{");
+
+        // Indent the block lines by 4 spaces.
+        for j in (i+1)..label_idx {
+            if !out[j].trim().is_empty() {
+                out[j] = format!("    {}", out[j]);
+            }
+        }
+
+        if has_else {
+            // Find the else label.
+            let else_pattern = format!("Label_{}:", else_label.trim_start_matches("Label_"));
+            let else_idx = out[label_idx+1..].iter().position(|l| l.trim() == else_pattern)
+                .map(|p| label_idx + 1 + p);
+            if let Some(ei) = else_idx {
+                // Replace the current label with `} else {`
+                out[label_idx] = "        } else {".to_string();
+                // Indent the else block.
+                for j in (label_idx+1)..ei {
+                    if !out[j].trim().is_empty() {
+                        out[j] = format!("    {}", out[j]);
+                    }
+                }
+                // Replace the else label with `}`
+                out[ei] = "        }".to_string();
+                i = ei + 1;
+                continue;
+            }
+        }
+
+        // No else: replace the label with `}`
+        out[label_idx] = "        }".to_string();
+        i = label_idx + 1;
+    }
+}
+
+/// Format a custom attribute line: `[Attr]` or `[Attr("args")]`.
+fn format_attr_line(name: &str, args: &str) -> String {
+    let simple = simple_name(&strip_system(name));
+    let short = simple.strip_suffix("Attribute").unwrap_or(&simple);
+    if args.is_empty() {
+        format!("[{short}]")
+    } else {
+        format!("[{short}({args})]")
+    }
+}
+
+/// Insert `try { ... } catch (...) { ... }` markers into the output lines
+/// based on exception handler clauses. This is a simple structural insertion
+/// that wraps the try and handler regions.
+fn insert_exception_markers(
+    reader: &Reader<'_>,
+    out: &mut Vec<String>,
+    offset_to_line: &std::collections::HashMap<usize, usize>,
+    exceptions: &[crate::metadata::reader::ExceptionHandler],
+) {
+    // Sort by try_offset so we insert from the end backward (to preserve indices).
+    let mut sorted = exceptions.to_vec();
+    sorted.sort_by_key(|e| (e.try_offset, e.handler_offset));
+
+    // Process in reverse order so insertions don't invalidate earlier indices.
+    for eh in sorted.iter().rev() {
+        let try_start = *offset_to_line.get(&(eh.try_offset as usize)).unwrap_or(&0);
+        let handler_start = *offset_to_line.get(&(eh.handler_offset as usize)).unwrap_or(&0);
+        let _try_end = *offset_to_line.get(&((eh.try_offset + eh.try_length) as usize)).unwrap_or(&handler_start);
+        let handler_end = *offset_to_line.get(&((eh.handler_offset + eh.handler_length) as usize)).unwrap_or(&out.len());
+
+        // Build the catch clause header.
+        let catch_header = match eh.flags {
+            0 => {
+                // catch: resolve the exception type from the class token.
+                let type_name = token_type_name(reader, eh.class_token);
+                format!("        catch ({}) {{", simple_name(&strip_system(&type_name)))
+            }
+            2 => "        finally {".to_string(),
+            3 => "        fault {".to_string(),
+            1 => "        catch (/* filter */) {".to_string(),
+            _ => "        catch {".to_string(),
+        };
+
+        // Insert closing brace after handler region.
+        if handler_end <= out.len() {
+            out.insert(handler_end, "        }".to_string());
+        }
+        // Insert catch header + closing brace of try before handler region.
+        if handler_start <= out.len() {
+            out.insert(handler_start, catch_header);
+            out.insert(handler_start, "        }".to_string());
+        }
+        // Insert try { before try region.
+        if try_start <= out.len() {
+            out.insert(try_start, "        try {".to_string());
+        }
+    }
+}
+
+/// Resolve a metadata token (0x02xxxxxx = TypeDef, 0x01xxxxxx = TypeRef) to a type name.
+fn token_type_name(reader: &Reader<'_>, token: u32) -> String {
+    let table = (token >> 24) as u8;
+    let row = (token & 0x00FF_FFFF) as usize;
+    match table {
+        tbl::TYPEREF => {
+            if let Some(r) = reader.tables.get(tbl::TYPEREF).get(row - 1) {
+                let ns = reader.type_ref_namespace(r);
+                let name = reader.type_ref_name(r);
+                if ns.is_empty() { name } else { format!("{ns}.{name}") }
+            } else { "?".into() }
+        }
+        tbl::TYPEDEF => {
+            if let Some(r) = reader.tables.get(tbl::TYPEDEF).get(row - 1) {
+                let ns = reader.type_def_namespace(r);
+                let name = reader.type_def_name(r);
+                if ns.is_empty() { name } else { format!("{ns}.{name}") }
+            } else { "?".into() }
+        }
+        _ => "?".into(),
+    }
 }
 
 fn collect_targets(instrs: &[Instruction]) -> std::collections::HashSet<usize> {
@@ -886,10 +1182,13 @@ fn handle_instr(
             let v = pop(stack);
             if let Operand::Switch(ts) = &ins.operand {
                 let base = ins.offset + ins.size;
+                out.push(format!("        switch ({v})"));
+                out.push("        {".into());
                 for (i, t) in ts.iter().enumerate() {
                     let tgt = target_offset_from(base, *t);
-                    stmt(out, format!("if ({v} == {i}) goto Label_{tgt:04X};"));
+                    out.push(format!("            case {i}: goto Label_{tgt:04X};"));
                 }
+                out.push("        }".into());
             }
         }
 

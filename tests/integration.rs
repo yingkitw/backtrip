@@ -59,6 +59,113 @@ fn decompiles_calculator_add_body() {
     assert!(calc.source.contains("public string Label { get; set; }"));
     assert!(!calc.source.contains("get_Label"), "getter method should be skipped");
     assert!(!calc.source.contains("set_Label"), "setter method should be skipped");
+    // Event: rendered as `event Notify OnCalculating;`, not add_/remove_ methods.
+    assert!(calc.source.contains("public event Notify OnCalculating;"));
+    assert!(!calc.source.contains("add_OnCalculating"), "add method should be skipped");
+    assert!(!calc.source.contains("remove_OnCalculating"), "remove method should be skipped");
+    // Custom attribute: [Obsolete] on the type, with constructor argument.
+    assert!(calc.source.contains("[Obsolete(\"Use NewCalculator instead.\")]"),
+        "attribute with args missing;\n{}", calc.source);
+}
+
+#[test]
+fn decompiles_explicit_interface_impl() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let counter = types
+        .iter()
+        .find(|t| t.file_name.contains("Counter"))
+        .expect("Counter file");
+    // Interface in base list should use simple name (same namespace).
+    assert!(counter.source.contains("public class Counter : IResettable"),
+        "interface base list wrong;\n{}", counter.source);
+    // Explicit interface impl: `void IResettable.Reset()` — no access modifier.
+    assert!(counter.source.contains("void IResettable.Reset()"),
+        "explicit impl missing;\n{}", counter.source);
+    // Must not render as `private virtual void Shapes.IResettable.Reset()`.
+    assert!(!counter.source.contains("private virtual"),
+        "explicit impl should not have access/virtual modifiers;\n{}", counter.source);
+    // P/Invoke: [DllImport] + extern, no body.
+    assert!(counter.source.contains("[DllImport(\"libc\")]"),
+        "DllImport attribute missing;\n{}", counter.source);
+    assert!(counter.source.contains("public static extern int getpid();"),
+        "P/Invoke method missing;\n{}", counter.source);
+    // Field-level attribute: [Obsolete] on Count.
+    assert!(counter.source.contains("[Obsolete]\n    public int Count"),
+        "field attribute missing;\n{}", counter.source);
+    // Method-level attribute: [Obsolete("Use IncrementBy instead.")] on Increment.
+    assert!(counter.source.contains("[Obsolete(\"Use IncrementBy instead.\")]"),
+        "method attribute with args missing;\n{}", counter.source);
+}
+
+#[test]
+fn decompiles_default_parameter() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // Default parameter: `int c = 0` in the 3-arg Add overload.
+    assert!(calc.source.contains("int c = 0"),
+        "default parameter missing;\n{}", calc.source);
+}
+
+#[test]
+fn decompiles_switch_statement() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // Switch: should render as `switch (day)` with `case N: goto` entries.
+    assert!(calc.source.contains("switch (day)"),
+        "switch statement missing;\n{}", calc.source);
+    assert!(calc.source.contains("case 0: goto"),
+        "switch case 0 missing;\n{}", calc.source);
+    assert!(calc.source.contains("case 6: goto"),
+        "switch case 6 missing;\n{}", calc.source);
+    // Must not render as `if (day == 0) goto` chain.
+    assert!(!calc.source.contains("if (day == 0) goto"),
+        "should use switch, not if-chain;\n{}", calc.source);
+}
+
+#[test]
+fn decompiles_try_catch() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // try/catch: should render `try {` and `catch (FormatException) {`.
+    assert!(calc.source.contains("try"), "try block missing;\n{}", calc.source);
+    assert!(calc.source.contains("catch (FormatException)"),
+        "catch clause missing;\n{}", calc.source);
+}
+
+#[test]
+fn decompiles_if_else() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // if/else: should render `if (x <= 0) {` with a block, not `if (x >= 0) goto`.
+    assert!(calc.source.contains("if (x <= 0) {"),
+        "if block missing;\n{}", calc.source);
+    assert!(calc.source.contains("return (-x);"),
+        "if body missing;\n{}", calc.source);
+    // Must not render as `if (x >= 0) goto Label_`.
+    assert!(!calc.source.contains("if (x >= 0) goto"),
+        "should use if block, not goto;\n{}", calc.source);
 }
 
 #[test]
