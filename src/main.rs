@@ -1,10 +1,10 @@
 use clap::Parser;
 use std::path::PathBuf;
-use transcode::{cil, decompile, error, metadata, output, pe};
+use roundtrip::{cil, decompile, error, metadata, output, pe};
 
-/// transcode - a .NET decompiler written in Rust.
+/// roundtrip - a .NET decompiler written in Rust.
 #[derive(Parser, Debug)]
-#[command(name = "transcode", version, about)]
+#[command(name = "roundtrip", version, about)]
 struct Cli {
     /// Path to the .NET assembly (.dll / .exe) to decompile.
     assembly: PathBuf,
@@ -20,6 +20,15 @@ struct Cli {
     /// List types in the assembly and exit.
     #[arg(long)]
     list: bool,
+
+    /// Decompile only the type whose simple or fully-qualified name matches.
+    #[arg(long = "type", name = "type")]
+    type_name: Option<String>,
+
+    /// Print the matched type to stdout instead of writing files
+    /// (requires --type).
+    #[arg(long)]
+    stdout: bool,
 }
 
 fn main() {
@@ -42,14 +51,49 @@ fn run() -> error::Result<()> {
         return Ok(());
     }
 
+    if cli.stdout && cli.type_name.is_none() {
+        return Err(error::Error::Usage(
+            "--stdout requires --type <NAME>".into(),
+        ));
+    }
+
     if cli.il {
-        let types = decompile_il(&reader)?;
+        let types = decompile_il(&reader, cli.type_name.as_deref())?;
+        if types.is_empty() {
+            return Err(error::Error::NotFound(format!(
+                "no type matching '{}'",
+                cli.type_name.as_deref().unwrap_or("")
+            )));
+        }
+        if cli.stdout {
+            for t in &types {
+                print!("{}", t.source);
+            }
+            return Ok(());
+        }
         let n = output::write_types(&cli.output, &types)?;
         println!("Wrote {n} IL file(s) to {}", cli.output.display());
         return Ok(());
     }
 
-    let types = decompile::decompile_assembly(&reader)?;
+    let types = if let Some(q) = cli.type_name.as_deref() {
+        match decompile::decompile_type_by_name(&reader, q)? {
+            Some(t) => vec![t],
+            None => {
+                return Err(error::Error::NotFound(format!(
+                    "no type matching '{q}'"
+                )));
+            }
+        }
+    } else {
+        decompile::decompile_assembly(&reader)?
+    };
+    if cli.stdout {
+        for t in &types {
+            print!("{}", t.source);
+        }
+        return Ok(());
+    }
     let n = output::write_types(&cli.output, &types)?;
     println!("Wrote {n} file(s) to {}", cli.output.display());
     Ok(())
@@ -79,8 +123,9 @@ fn list_types(reader: &metadata::Reader<'_>) -> error::Result<()> {
     Ok(())
 }
 
-/// Produce IL disassembly files, one per type.
-fn decompile_il(reader: &metadata::Reader<'_>) -> error::Result<Vec<decompile::DecompiledType>> {
+/// Produce IL disassembly files, one per type. If `filter` is given, only the
+/// type whose simple or fully-qualified name matches is included.
+fn decompile_il(reader: &metadata::Reader<'_>, filter: Option<&str>) -> error::Result<Vec<decompile::DecompiledType>> {
     let mut out = Vec::new();
     let type_defs = reader.tables.get(metadata::tbl::TYPEDEF);
     for (i, row) in type_defs.iter().enumerate() {
@@ -90,6 +135,16 @@ fn decompile_il(reader: &metadata::Reader<'_>) -> error::Result<Vec<decompile::D
             continue;
         }
         let ns = reader.type_def_namespace(row);
+        if let Some(q) = filter {
+            let full = if ns.is_empty() {
+                name.clone()
+            } else {
+                format!("{ns}.{name}")
+            };
+            if name != q && full != q {
+                continue;
+            }
+        }
         let source = il_for_type(reader, row_idx)?;
         let file_name = {
             let clean = name.replace('`', "_").replace('/', "_");
@@ -130,6 +185,14 @@ fn il_for_type(reader: &metadata::Reader<'_>, row_idx: u32) -> error::Result<Str
         s.push_str(&format!("  .method {} {}({})\n  {{\n", ret, mname, params.join(", ")));
         let rva = reader.method_rva(m);
         if let Some(body) = reader.method_body(rva)? {
+            // Emit a .locals header when the method has locals.
+            let locals = reader.local_types(body.local_token);
+            if !locals.is_empty() {
+                let decls: Vec<String> = locals.iter().enumerate()
+                    .map(|(i, t)| format!("{} V_{i}", reader.type_name(t)))
+                    .collect();
+                s.push_str(&format!("    .locals init ({})\n", decls.join(", ")));
+            }
             let il = cil::disasm::disassemble(reader, &body.code)?;
             for line in il.lines() {
                 s.push_str(&format!("    {line}\n"));

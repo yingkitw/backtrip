@@ -1,4 +1,4 @@
-# transcode — TODO
+# roundtrip — TODO
 
 ## Done
 
@@ -18,6 +18,10 @@
 - [x] class/struct/interface/enum detection; generic type parameters
 - [x] Per-type file output; CLI (clap) with --il / --list
 - [x] Integration tests against a sample .NET assembly
+- [x] Suppress redundant `base();` for constructors whose base is `object`
+- [x] `--type <NAME>` to decompile a single type
+- [x] `--stdout` to print a type to stdout instead of writing files
+- [x] Better IL disassembly: resolve `ldstr` to the literal, locals names
 
 ## Next — control flow
 
@@ -26,7 +30,6 @@
 - [ ] `switch` blocks (CIL `switch` → C# `switch`)
 - [ ] `try`/`catch`/`finally`/`fault` from exception regions (method section
       headers: EHCOR, fat sections)
-- [ ] Suppress redundant `base();` for constructors whose base is `object`
 
 ## Next — language features
 
@@ -64,21 +67,18 @@
 
 ## Next — tooling
 
-- [ ] `--type <NAME>` to decompile a single type
-- [ ] `--stdout` to print a type to stdout instead of writing files
 - [ ] Recursive multi-assembly decompilation (`--recursive` on a directory)
 - [ ] Round-trip: recompile decompiled output and diff IL (verification)
-- [ ] Better IL disassembly: resolve `ldstr` to the literal, locals names
 
 ## Brainstorming (competitive intelligence)
 
 Compared to ILSpy / dnSpy / ILRepack / dotPeek / JetBrains dotPeek:
 
 - ILSpy has high-quality C# reconstruction, decompilation of all C# features,
-  and a tree UI. transcode should target the same output quality over time.
+  and a tree UI. roundtrip should target the same output quality over time.
 - dnSpy has a debugger. Out of scope for a CLI decompiler, but a `--watch`
   mode could be interesting.
-- Iced (C# library) is a strong IL parser; transcode's Rust IL parser is
+- Iced (C# library) is a strong IL parser; roundtrip's Rust IL parser is
   comparable in coverage. Iced adds a full IL assembler — consider a
   round-trip assembler later.
 - Add a `--json` output mode for machine consumption (type/method/field model).

@@ -8,6 +8,8 @@ pub enum Error {
     InvalidCil(String),
     InvalidSignature(String),
     NotImplemented(&'static str),
+    NotFound(String),
+    Usage(String),
 }
 
 impl fmt::Display for Error {
@@ -19,6 +21,8 @@ impl fmt::Display for Error {
             Error::InvalidCil(m) => write!(f, "invalid CIL: {m}"),
             Error::InvalidSignature(m) => write!(f, "invalid signature: {m}"),
             Error::NotImplemented(m) => write!(f, "not implemented: {m}"),
+            Error::NotFound(m) => write!(f, "not found: {m}"),
+            Error::Usage(m) => write!(f, "usage: {m}"),
         }
     }
 }

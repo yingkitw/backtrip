@@ -1,5 +1,5 @@
 [package]
-name = "transcode"
+name = "roundtrip"
 version = "0.1.0"
 edition = "2024"
 description = "A .NET decompiler written in Rust"

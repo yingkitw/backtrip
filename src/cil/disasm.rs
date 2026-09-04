@@ -44,8 +44,8 @@ fn format_operand(reader: &Reader<'_>, ins: &Instruction, all: &[Instruction]) -
             format!("({})", labels.join(", "))
         }
         Operand::Token(tok) => format_token(reader, *tok),
-        Operand::ShortVar(i) => format!("{i}"),
-        Operand::Var(i) => format!("{i}"),
+        Operand::ShortVar(i) => format!("V_{i}"),
+        Operand::Var(i) => format!("V_{i}"),
     }
 }
 
@@ -63,6 +63,11 @@ fn target_off(instr_offset: usize, instr_size: usize, rel: i32) -> usize {
 pub fn format_token(reader: &Reader<'_>, tok: u32) -> String {
     let table = (tok >> 24) as u8;
     let row = (tok & 0x00FF_FFFF) as usize;
+    // User-string token (ldstr): table 0x70, index into the #US heap.
+    if table == 0x70 {
+        let s = reader.root.get_user_string(row as u32).unwrap_or_default();
+        return quote_string(&s);
+    }
     match table {
         tbl::TYPEREF => {
             if let Some(r) = reader.tables.get(tbl::TYPEREF).get(row - 1) {
@@ -113,4 +118,23 @@ fn format_token_str(ns: String, name: String) -> String {
     } else {
         format!("{ns}.{name}")
     }
+}
+
+/// Quote a user string for IL disassembly output (ildasm-style).
+fn quote_string(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }

@@ -29,6 +29,31 @@ pub fn decompile_assembly(reader: &Reader<'_>) -> Result<Vec<DecompiledType>> {
     Ok(out)
 }
 
+/// Decompile a single type, matched by simple name or fully-qualified name
+/// (`Namespace.Name`). Returns `Ok(None)` if no type matches.
+pub fn decompile_type_by_name(reader: &Reader<'_>, query: &str) -> Result<Option<DecompiledType>> {
+    let type_defs = reader.tables.get(tbl::TYPEDEF);
+    for (i, row) in type_defs.iter().enumerate() {
+        let row_idx = (i + 1) as u32;
+        let name = reader.type_def_name(row);
+        if name == "<Module>" {
+            continue;
+        }
+        let ns = reader.type_def_namespace(row);
+        let full = if ns.is_empty() {
+            name.clone()
+        } else {
+            format!("{ns}.{name}")
+        };
+        if name == query || full == query {
+            let source = decompile_type(reader, row_idx)?;
+            let file_name = file_name_for(&ns, &name);
+            return Ok(Some(DecompiledType { file_name, source }));
+        }
+    }
+    Ok(None)
+}
+
 fn file_name_for(ns: &str, name: &str) -> String {
     // Sanitize nested-type separators and generic arity markers.
     let clean = name.replace('`', "_").replace('/', "_").replace('\\', "_");
@@ -546,7 +571,12 @@ fn handle_instr(
                 let expr = if csig.has_this {
                     let obj = pop(stack);
                     if mname == ".ctor" {
-                        stmt(out, "base();".into());
+                        // Suppress the implicit base() call to System.Object —
+                        // C# emits it implicitly for any class without an
+                        // explicit base constructor call.
+                        if owner != "Object" {
+                            stmt(out, "base();".into());
+                        }
                         String::new()
                     } else {
                         format!("{obj}.{mname}({})", args.join(", "))

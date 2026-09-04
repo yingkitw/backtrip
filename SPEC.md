@@ -1,4 +1,4 @@
-# transcode — Specification
+# roundtrip — Specification
 
 ## Purpose
 
@@ -13,13 +13,20 @@ A single PE file (`.dll` or `.exe`) containing a .NET CLI runtime header
 ## CLI
 
 ```
-transcode <ASSEMBLY> [-o <DIR>] [--il] [--list]
+roundtrip <ASSEMBLY> [-o <DIR>] [--il] [--list] [--type <NAME>] [--stdout]
 ```
 
 - Default action: decompile to C#, one `.cs` file per type, written to the
   output directory (default `decompiled`).
 - `--il`: write `.il` disassembly files instead.
 - `--list`: print fully-qualified type names to stdout and exit.
+- `--type <NAME>`: decompile only the type whose simple name
+  (`Calculator`) or fully-qualified name (`Shapes.Calculator`) matches.
+  Works with both C# and `--il` output. Exits non-zero with
+  `not found: no type matching '<NAME>'` if no type matches.
+- `--stdout`: print the matched type's source to stdout instead of writing
+  files. Requires `--type <NAME>` (exits non-zero with
+  `usage: --stdout requires --type <NAME>` otherwise). Works with `--il`.
 
 ## Pipeline
 

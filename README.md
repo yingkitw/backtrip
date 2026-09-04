@@ -1,4 +1,4 @@
-# transcode
+# roundtrip
 
 A .NET decompiler written in Rust. Parses ECMA-335 PE/CLI metadata and CIL
 bytecode, then decompiles assemblies back to C# source (one file per type) or
@@ -36,16 +36,16 @@ cargo build --release
 
 ```bash
 # Decompile to C# (one .cs file per type) into ./decompiled
-transcode path/to/Assembly.dll
+roundtrip path/to/Assembly.dll
 
 # Choose an output directory
-transcode path/to/Assembly.dll -o out/
+roundtrip path/to/Assembly.dll -o out/
 
 # Emit CIL disassembly instead of C#
-transcode path/to/Assembly.dll --il
+roundtrip path/to/Assembly.dll --il
 
 # List types only
-transcode path/to/Assembly.dll --list
+roundtrip path/to/Assembly.dll --list
 ```
 
 ### Flags

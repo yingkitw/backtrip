@@ -1,8 +1,8 @@
-# transcode — Architecture
+# roundtrip — Architecture
 
 ## Overview
 
-transcode is a pipeline: PE bytes → metadata → CIL → C# (or IL). Each stage is
+roundtrip is a pipeline: PE bytes → metadata → CIL → C# (or IL). Each stage is
 a module with a clear boundary; data flows downward and is immutable once
 parsed.
 
