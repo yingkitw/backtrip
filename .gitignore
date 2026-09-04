@@ -1,0 +1,4 @@
+/target
+/decompiled
+tests/fixtures/bin
+tests/fixtures/obj

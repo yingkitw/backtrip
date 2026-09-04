@@ -1,0 +1,13 @@
+[package]
+name = "transcode"
+version = "0.1.0"
+edition = "2024"
+description = "A .NET decompiler written in Rust"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
