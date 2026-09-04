@@ -194,6 +194,12 @@ namespace Shapes
             }
             return "Unknown";
         }
+
+        public int RunWithClosure(int offset)
+        {
+            System.Func<int, int> adder = x => x + offset;
+            return adder(10);
+        }
     }
 
     public struct Point

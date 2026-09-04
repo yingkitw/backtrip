@@ -155,7 +155,7 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
         // Fallback: if no Invoke method found, fall through to class rendering.
     }
 
-    s.push_str(&format!("{} {}{}", keywords.join(" "), name, generic_decl));
+    s.push_str(&format!("{} {}{}", keywords.join(" "), clean_display_class_name(&name), generic_decl));
 
     // Base type / interfaces.
     let mut bases: Vec<String> = Vec::new();
@@ -373,6 +373,11 @@ fn strip_system(n: &str) -> String {
     }
 }
 
+/// Public wrapper for `strip_system` — used by the JSON output module.
+pub fn strip_system_pub(n: &str) -> String {
+    strip_system(n)
+}
+
 /// Return the last segment of a dotted type name (e.g. "Shapes.Notify" → "Notify").
 fn simple_name(n: &str) -> String {
     n.rsplit('.').next().unwrap_or(n).to_string()
@@ -471,12 +476,12 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
     let display_name = if let Some((iface, mname)) = explicit {
         format!("{}.{}", simple_name(&strip_system(iface)), mname)
     } else {
-        name.clone()
+        clean_display_class_name(&name)
     };
     let header = if is_ctor {
         format!("    {} {}{}({})",
             mods.join(" "),
-            type_name,
+            clean_display_class_name(type_name),
             generic_decl,
             params.join(", "),
         )
@@ -626,6 +631,9 @@ fn decompile_body(
 
     // Post-process: reconstruct collection initializers from dup+Add patterns.
     restructure_collection_initializers(&mut out);
+
+    // Post-process: reconstruct switch statements with inlined case bodies.
+    restructure_switch(&mut out);
 
     let mut s = String::new();
     // Local declarations.
@@ -1519,6 +1527,211 @@ fn restructure_collection_initializers(out: &mut Vec<String>) {
     // For now, the temp variable approach is clean enough.
 }
 
+/// Post-process: reconstruct switch statements by inlining case bodies.
+/// Pattern:
+///   switch (v)
+///   {
+///       case 0: goto Label_AAAA;
+///       case 1: goto Label_BBBB;
+///       ...
+///   }
+///   goto Label_ZZZZ;          ← default fallthrough
+///   Label_AAAA:
+///   ... case 0 body ...
+///   Label_BBBB:
+///   ... case 1 body ...
+///   Label_ZZZZ:
+///   ... default body ...
+///
+/// Transforms to:
+///   switch (v)
+///   {
+///       case 0:
+///           ... case 0 body ...
+///       case 1:
+///           ... case 1 body ...
+///       default:
+///           ... default body ...
+///   }
+fn restructure_switch(out: &mut Vec<String>) {
+    let mut i = 0;
+    while i < out.len() {
+        // Look for `switch (...)`
+        if !out[i].trim().starts_with("switch (") || !out[i].trim().ends_with(")") {
+            i += 1;
+            continue;
+        }
+
+        // Next line should be `{`
+        if i + 1 >= out.len() || out[i + 1].trim() != "{" {
+            i += 1;
+            continue;
+        }
+
+        // Collect case labels: `case N: goto Label_XXXX;`
+        let mut cases: Vec<(usize, String)> = Vec::new(); // (case_num, label)
+        let mut j = i + 2;
+        while j < out.len() {
+            let t = out[j].trim();
+            if let Some(rest) = t.strip_prefix("case ") {
+                if let Some(goto_pos) = rest.find(": goto ") {
+                    let case_num = &rest[..goto_pos];
+                    let label_part = &rest[goto_pos + 7..].trim_end_matches(';');
+                    if let Ok(n) = case_num.parse::<usize>() {
+                        cases.push((n, label_part.to_string()));
+                        j += 1;
+                        continue;
+                    }
+                }
+            }
+            break;
+        }
+
+        if cases.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        // j should now be at the switch close `}`
+        if j >= out.len() || out[j].trim() != "}" {
+            i += 1;
+            continue;
+        }
+        let switch_close = j;
+
+        // After the switch close, there should be a `goto Label_ZZZZ;` (default)
+        let default_goto_idx = switch_close + 1;
+        let default_label = if default_goto_idx < out.len() {
+            let t = out[default_goto_idx].trim();
+            if t.starts_with("goto Label_") {
+                Some(t["goto ".len()..].trim_end_matches(';').to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Collect all labels AFTER the switch close + default goto.
+        let search_start = default_goto_idx + 1;
+        let mut all_labels: Vec<(usize, String)> = Vec::new();
+        for k in search_start..out.len() {
+            let t = out[k].trim();
+            if t.starts_with("Label_") && t.ends_with(':') {
+                all_labels.push((k, t.trim_end_matches(':').to_string()));
+            }
+        }
+
+        // Build a map: label → body lines (until the next label or method close).
+        let mut label_bodies: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        for (idx, (line_idx, label)) in all_labels.iter().enumerate() {
+            let body_start = line_idx + 1;
+            let body_end = if idx + 1 < all_labels.len() {
+                all_labels[idx + 1].0
+            } else {
+                // Find the method close `}` — stop before it.
+                let mut end = out.len();
+                for k in body_start..out.len() {
+                    if out[k].trim() == "}" {
+                        end = k;
+                        break;
+                    }
+                }
+                end
+            };
+            let body: Vec<String> = out[body_start..body_end].iter()
+                .filter(|l| !l.trim().is_empty())
+                .cloned()
+                .collect();
+            label_bodies.insert(label.clone(), body);
+        }
+
+        // Build the new switch block.
+        let mut new_lines: Vec<String> = Vec::new();
+        new_lines.push(out[i].clone()); // `switch (v)`
+        new_lines.push("        {".into());
+
+        for (case_num, label) in &cases {
+            new_lines.push(format!("            case {case_num}:"));
+            if let Some(body) = label_bodies.get(label) {
+                for bl in body {
+                    let stripped = bl.trim_start();
+                    new_lines.push(format!("                {stripped}"));
+                }
+            }
+        }
+
+        // Default case.
+        if let Some(default_label) = &default_label {
+            if let Some(body) = label_bodies.get(default_label) {
+                new_lines.push("            default:".into());
+                for bl in body {
+                    let stripped = bl.trim_start();
+                    new_lines.push(format!("                {stripped}"));
+                }
+            }
+        }
+
+        new_lines.push("        }".into());
+
+        // Find the end of the old switch block to replace.
+        // It extends from `switch (v)` to the end of the last referenced
+        // label's body.
+        let mut last_line = switch_close;
+        let referenced_labels: Vec<&String> = cases.iter().map(|(_, l)| l)
+            .chain(default_label.as_ref())
+            .collect();
+        for (idx, (label_line, label)) in all_labels.iter().enumerate() {
+            if referenced_labels.contains(&label) {
+                let body_end = if idx + 1 < all_labels.len() {
+                    all_labels[idx + 1].0
+                } else {
+                    // Find the method close `}`.
+                    let mut end = out.len();
+                    for k in (label_line + 1)..out.len() {
+                        if out[k].trim() == "}" {
+                            end = k;
+                            break;
+                        }
+                    }
+                    end
+                };
+                if body_end > last_line {
+                    last_line = body_end;
+                }
+            }
+        }
+
+        // Replace the old switch block with the new one.
+        let replace_count = last_line - i;
+        out.splice(i..i + replace_count, new_lines.iter().cloned());
+
+        // Skip past the new switch block.
+        i += new_lines.len();
+    }
+}
+
+/// Clean up compiler-generated display class names.
+/// `<>c__DisplayClass32_0` → `DisplayClass`
+/// `<RunWithClosure>b__0` → `lambda_0`
+fn clean_display_class_name(name: &str) -> String {
+    if name.contains("<>c__DisplayClass") {
+        return "DisplayClass".to_string();
+    }
+    if name.contains("b__") {
+        if let Some(pos) = name.find("b__") {
+            let suffix = &name[pos + 3..];
+            return format!("lambda_{suffix}");
+        }
+    }
+    name.to_string()
+}
+
+/// Public wrapper for `clean_display_class_name` — used by the verify module.
+pub fn clean_display_class_name_pub(name: &str) -> String {
+    clean_display_class_name(name)
+}
+
 /// Clean up compiler-generated field names.
 /// `<Count>k__BackingField` → `Count`
 fn clean_field_name(fname: &str) -> String {
@@ -1528,6 +1741,11 @@ fn clean_field_name(fname: &str) -> String {
         }
     }
     fname.to_string()
+}
+
+/// Public wrapper for `clean_field_name` — used by the verify module.
+pub fn clean_field_name_pub(fname: &str) -> String {
+    clean_field_name(fname)
 }
 
 /// Format a custom attribute line: `[Attr]` or `[Attr("args")]`.
@@ -2058,7 +2276,7 @@ fn handle_instr(
         "ldftn" => {
             if let Operand::Token(tok) = &ins.operand {
                 let (t, m) = method_ref_name(reader, *tok);
-                push(stack, format!("{t}.{m}"));
+                push(stack, format!("{}.{}", clean_display_class_name(&t), clean_display_class_name(&m)));
             }
         }
 
@@ -2245,7 +2463,7 @@ fn build_newobj(reader: &Reader<'_>, tok: u32, stack: &mut Vec<String>) -> Strin
         args.push(stack.pop().unwrap_or_else(|| "/*?*/".into()));
     }
     args.reverse();
-    format!("new {owner}({})", args.join(", "))
+    format!("new {}({})", clean_display_class_name(&owner), args.join(", "))
 }
 
 /// Resolve a method token to (owner type name, method name, signature).

@@ -122,16 +122,29 @@ fn decompiles_switch_statement() {
         .iter()
         .find(|t| t.file_name.contains("Calculator"))
         .expect("Calculator file");
-    // Switch: should render as `switch (day)` with `case N: goto` entries.
+    // Switch: should render as `switch (day)` with inlined case bodies.
     assert!(calc.source.contains("switch (day)"),
         "switch statement missing;\n{}", calc.source);
-    assert!(calc.source.contains("case 0: goto"),
+    assert!(calc.source.contains("case 0:"),
         "switch case 0 missing;\n{}", calc.source);
-    assert!(calc.source.contains("case 6: goto"),
+    assert!(calc.source.contains("case 6:"),
         "switch case 6 missing;\n{}", calc.source);
+    // Should have inlined case bodies (return statements inside cases).
+    assert!(calc.source.contains("return \"Sunday\";"),
+        "case 0 body should be inlined;\n{}", calc.source);
+    assert!(calc.source.contains("return \"Saturday\";"),
+        "case 6 body should be inlined;\n{}", calc.source);
+    // Should have a default case.
+    assert!(calc.source.contains("default:"),
+        "default case missing;\n{}", calc.source);
+    assert!(calc.source.contains("return \"Unknown\";"),
+        "default body should be inlined;\n{}", calc.source);
     // Must not render as `if (day == 0) goto` chain.
     assert!(!calc.source.contains("if (day == 0) goto"),
         "should use switch, not if-chain;\n{}", calc.source);
+    // Must not have goto labels for cases.
+    assert!(!calc.source.contains("case 0: goto"),
+        "should not have goto in cases;\n{}", calc.source);
 }
 
 #[test]
@@ -420,6 +433,27 @@ fn decompiles_is_as_patterns() {
 }
 
 #[test]
+fn decompiles_display_class_cleanup() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // Display class names should be cleaned up.
+    assert!(calc.source.contains("DisplayClass"),
+        "display class name should be cleaned up;\n{}", calc.source);
+    assert!(!calc.source.contains("<>c__DisplayClass"),
+        "raw display class name should not appear;\n{}", calc.source);
+    // Lambda method names should be cleaned up.
+    assert!(calc.source.contains("lambda_0"),
+        "lambda method name should be cleaned up;\n{}", calc.source);
+    assert!(!calc.source.contains("b__0"),
+        "raw lambda method name should not appear;\n{}", calc.source);
+}
+
+#[test]
 fn decompiles_struct_point() {
     let (_pe, root, tables) = load_reader();
     let reader = Reader::new(&_pe, &root, &tables).unwrap();
@@ -648,4 +682,73 @@ fn cli_recursive_decompiles_directory() {
         e.as_ref().unwrap().path().extension().map_or(false, |ext| ext == "cs")
     });
     assert!(has_cs, "should have .cs files in output");
+}
+
+#[test]
+fn cli_json_outputs_valid_model() {
+    let out = std::process::Command::new(roundtrip_bin())
+        .arg(sample_dll())
+        .arg("--json")
+        .output()
+        .expect("run roundtrip");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let json = String::from_utf8_lossy(&out.stdout);
+    // Should be valid JSON (parse with python).
+    let parsed = std::process::Command::new("python3")
+        .arg("-m").arg("json.tool")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn();
+    if let Ok(mut child) = parsed {
+        use std::io::Write;
+        child.stdin.as_mut().unwrap().write_all(json.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "JSON should be valid");
+    }
+    // Should contain expected type and method names.
+    assert!(json.contains("\"Calculator\""), "should contain Calculator type");
+    assert!(json.contains("\"namespace\": \"Shapes\""), "should contain Shapes namespace");
+    assert!(json.contains("\"Add\""), "should contain Add method");
+    assert!(json.contains("\"returnType\": \"int\""), "should contain int return type");
+    assert!(json.contains("\"fields\""), "should have fields array");
+    assert!(json.contains("\"methods\""), "should have methods array");
+}
+
+#[test]
+fn cli_detect_obfuscation_clean_assembly() {
+    let out = std::process::Command::new(roundtrip_bin())
+        .arg(sample_dll())
+        .arg("--detect-obfuscation")
+        .output()
+        .expect("run roundtrip");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let report = String::from_utf8_lossy(&out.stdout);
+    // Clean assembly should report no obfuscation indicators.
+    assert!(report.contains("Obfuscation detection report"),
+        "should have report header;\n{}", report);
+    assert!(report.contains("No obfuscation indicators found"),
+        "clean assembly should have no warnings;\n{}", report);
+    // Should report the number of types and methods scanned.
+    assert!(report.contains("types") && report.contains("methods scanned"),
+        "should report scan summary;\n{}", report);
+}
+
+#[test]
+fn cli_verify_clean_assembly() {
+    let out = std::process::Command::new(roundtrip_bin())
+        .arg(sample_dll())
+        .arg("--verify")
+        .output()
+        .expect("run roundtrip");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let report = String::from_utf8_lossy(&out.stdout);
+    // Should have a verification report header.
+    assert!(report.contains("Verification report"),
+        "should have report header;\n{}", report);
+    // Clean assembly should have 0 missing items.
+    assert!(report.contains("0 missing"),
+        "clean assembly should have 0 missing;\n{}", report);
+    // Should report the number of types, methods, and fields verified.
+    assert!(report.contains("Verified") && report.contains("types"),
+        "should report verification summary;\n{}", report);
 }

@@ -65,15 +65,18 @@
 ## Next — async / closures / state machines
 
 - [ ] `async`/`await` state-machine recognition and reversal
-- [ ] Lambda / closure reconstruction (display classes)
+- [x] Lambda / closure reconstruction (display class name cleanup)
+- [ ] Lambda / closure full inlining (display class → lambda expression)
 - [ ] `yield` iterator state-machine reversal
 - [x] `is` patterns and `as` operator rendering (isinst/castclass cleanup)
+- [x] `switch` statement reconstruction (inlined case bodies + default)
 - [ ] `switch` expressions, pattern matching
 
 ## Next — tooling
 
 - [x] Recursive multi-assembly decompilation (`--recursive` on a directory)
-- [ ] Round-trip: recompile decompiled output and diff IL (verification)
+- [x] Structural verification (`--verify`): check all types/methods/fields appear in output
+- [ ] Full round-trip: recompile decompiled output and diff IL (verification)
 
 ## Brainstorming (competitive intelligence)
 
@@ -86,6 +89,6 @@ Compared to ILSpy / dnSpy / ILRepack / dotPeek / JetBrains dotPeek:
 - Iced (C# library) is a strong IL parser; roundtrip's Rust IL parser is
   comparable in coverage. Iced adds a full IL assembler — consider a
   round-trip assembler later.
-- Add a `--json` output mode for machine consumption (type/method/field model).
-- Add detection of obfuscation (encrypted strings, control-flow flattening)
+- [x] Add a `--json` output mode for machine consumption (type/method/field model).
+- [x] Add detection of obfuscation (encrypted strings, control-flow flattening)
   and emit warnings.

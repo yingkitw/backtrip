@@ -34,6 +34,20 @@ struct Cli {
     /// Recursively decompile all .dll/.exe files in a directory.
     #[arg(long)]
     recursive: bool,
+
+    /// Emit a JSON model of the assembly (types/methods/fields) to stdout.
+    #[arg(long)]
+    json: bool,
+
+    /// Detect obfuscation indicators (non-printable names, control-flow
+    /// flattening, string encryption) and emit warnings.
+    #[arg(long)]
+    detect_obfuscation: bool,
+
+    /// Verify decompiled output against metadata (check all types/methods/
+    /// fields appear in the output).
+    #[arg(long)]
+    verify: bool,
 }
 
 fn main() {
@@ -63,6 +77,25 @@ fn decompile_one(cli: &Cli) -> error::Result<()> {
 
     if cli.list {
         list_types(&reader)?;
+        return Ok(());
+    }
+
+    if cli.json {
+        let json = decompile::json::assembly_to_json(&reader)?;
+        print!("{json}");
+        return Ok(());
+    }
+
+    if cli.detect_obfuscation {
+        let warnings = decompile::obfuscation::detect_obfuscation(&reader)?;
+        print!("{}", decompile::obfuscation::format_warnings(&warnings));
+        return Ok(());
+    }
+
+    if cli.verify {
+        let types = decompile::decompile_assembly(&reader)?;
+        let results = decompile::verify::verify(&reader, &types)?;
+        print!("{}", decompile::verify::format_results(&results));
         return Ok(());
     }
 
@@ -150,6 +183,9 @@ fn run_recursive(cli: &Cli) -> error::Result<()> {
             type_name: cli.type_name.clone(),
             stdout: false,
             recursive: false,
+            json: false,
+            detect_obfuscation: false,
+            verify: false,
         };
 
         match decompile_one(&sub_cli) {
