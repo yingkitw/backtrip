@@ -3,7 +3,6 @@
 
 use crate::error::Result;
 use crate::metadata::reader::Reader;
-use crate::metadata::signatures::Type;
 use crate::metadata::tables::tbl;
 
 /// Escape a string for JSON output.

@@ -1559,7 +1559,6 @@ fn restructure_collection_initializers(out: &mut Vec<String>) {
 fn detect_switch_expr_pattern(
     cases: &[(usize, String)],
     label_bodies: &std::collections::HashMap<String, Vec<String>>,
-    default_label: &Option<String>,
 ) -> Option<String> {
     let mut common_label: Option<String> = None;
     let mut all_match = true;
@@ -1707,7 +1706,7 @@ fn restructure_switch(out: &mut Vec<String>) {
         // Check if this is a switch expression pattern: all case bodies
         // end with `goto Label_XXXX;` targeting the same label, and that
         // label has `return V_N;` or `V_N = ...;`.
-        let switch_expr_label = detect_switch_expr_pattern(&cases, &label_bodies, &default_label);
+        let switch_expr_label = detect_switch_expr_pattern(&cases, &label_bodies);
 
         let mut new_lines: Vec<String> = Vec::new();
         new_lines.push(out[i].clone()); // `switch (v)`
