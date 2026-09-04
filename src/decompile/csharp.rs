@@ -142,11 +142,11 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
             }
         });
         if let Some((sig, mi)) = invoke {
-            let ret_type = reader.type_name(&sig.ret_type);
+            let ret_type = strip_system(&reader.type_name(&sig.ret_type));
             let param_names = method_param_names(reader, (mi + 1) as u32, &sig, false);
             let params: Vec<String> = sig.param_types.iter().enumerate().map(|(i, t)| {
                 let pname = param_names.get(i).cloned().unwrap_or_else(|| format!("arg{i}"));
-                format!("{} {}", reader.type_name(t), pname)
+                format!("{} {}", strip_system(&reader.type_name(t)), pname)
             }).collect();
             s.push_str(&format!("{} delegate {} {}{}({});\n",
                 access, ret_type, name, generic_decl, params.join(", ")));
@@ -160,7 +160,7 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
     // Base type / interfaces.
     let mut bases: Vec<String> = Vec::new();
     if !is_interface && !is_struct && !is_enum {
-        if !base_full.is_empty() && base_simple != "Object" {
+        if !base_full.is_empty() && base_simple != "Object" && base_simple != "object" {
             bases.push(base_full.clone());
         }
     }
@@ -226,7 +226,7 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
             continue;
         }
         let fflags = reader.field_flags(f);
-        let ftype = reader.field_type(f).map(|t| reader.type_name(&t)).unwrap_or_else(|_| "object".into());
+        let ftype = reader.field_type(f).map(|t| strip_system(&reader.type_name(&t))).unwrap_or_else(|_| "object".into());
         // Field-level custom attributes.
         let field_attrs = reader.custom_attributes_with_args_for(tbl::FIELD, fi as u32 + 1);
         for (name, args) in &field_attrs {
@@ -261,7 +261,7 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
         } else {
             "public"
         };
-        let type_str = reader.type_name(ptype);
+        let type_str = strip_system(&reader.type_name(ptype));
         let mut accessors: Vec<&str> = Vec::new();
         if getter.is_some() { accessors.push("get"); }
         if setter.is_some() { accessors.push("set"); }
@@ -453,16 +453,16 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
             if let Some(&param_row) = param_defaults.get(&seq) {
                 if let Some((tc, blob)) = reader.constant_for_param(param_row) {
                     let def = format_constant(tc, blob);
-                    return format!("{} {} = {}", reader.type_name(t), pname, def);
+                    return format!("{} {} = {}", strip_system(&reader.type_name(t)), pname, def);
                 }
             }
             // Check for out parameter (ByRef + Out flag → `out` instead of `ref`).
             if param_is_out.contains(&seq) {
                 if let Type::ByRef(inner) = t {
-                    return format!("out {} {}", reader.type_name(inner), pname);
+                    return format!("out {} {}", strip_system(&reader.type_name(inner)), pname);
                 }
             }
-            format!("{} {}", reader.type_name(t), pname)
+            format!("{} {}", strip_system(&reader.type_name(t)), pname)
         })
         .collect();
 
@@ -481,7 +481,7 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
             params.join(", "),
         )
     } else {
-        let ret_type = reader.type_name(&sig.ret_type);
+        let ret_type = strip_system(&reader.type_name(&sig.ret_type));
         format!("    {} {} {}{}({})",
             mods.join(" "),
             ret_type,
@@ -631,7 +631,7 @@ fn decompile_body(
     // Local declarations.
     for (i, lt) in local_types.iter().enumerate() {
         let lname = local_names.get(i).cloned().unwrap_or_else(|| format!("V_{i}"));
-        s.push_str(&format!("        {} {} = default;\n", reader.type_name(lt), lname));
+        s.push_str(&format!("        {} {} = default;\n", strip_system(&reader.type_name(lt)), lname));
     }
     if !local_types.is_empty() {
         s.push('\n');
@@ -653,6 +653,18 @@ fn local_type_names(local_types: &[Type]) -> Vec<String> {
 /// Negate a comparison operator for if/else restructuring.
 /// `if (a >= b) goto L;` → `if (a < b) { ... }`
 fn negate_cond(cond: &str) -> String {
+    // If cond is `(!x)` or `!(x)`, strip the negation.
+    let trimmed = cond.trim();
+    if trimmed.starts_with("(!") && trimmed.ends_with(')') {
+        // `(!x)` → `(x)`
+        let inner = &trimmed[2..trimmed.len()-1];
+        return format!("({inner})");
+    }
+    if trimmed.starts_with("!(") && trimmed.ends_with(')') {
+        // `!(x)` → `(x)`
+        let inner = &trimmed[2..trimmed.len()-1];
+        return format!("({inner})");
+    }
     // cond is like "(a >= b)" — find the operator and flip it.
     let ops = [(">=", "<"), ("<=", ">"), (">", "<="), ("<", ">="), ("==", "!="), ("!=", "==")];
     for (a, b) in ops {
@@ -1751,7 +1763,9 @@ fn handle_instr(
         }
         "ldloca.s" | "ldloca" => {
             let idx = var_index(&ins.operand);
-            push(stack, format!("ref {}", local_name(local_names, idx as usize)));
+            // Load the address of a local — for method calls on value types,
+            // C# just uses the variable name directly (the address is implicit).
+            push(stack, local_name(local_names, idx as usize));
         }
         "stloc.0" => store_local(out, stack, local_names, 0),
         "stloc.1" => store_local(out, stack, local_names, 1),
@@ -1830,14 +1844,14 @@ fn handle_instr(
                         // Suppress the implicit base() call to System.Object —
                         // C# emits it implicitly for any class without an
                         // explicit base constructor call.
-                        if owner != "Object" {
+                        if owner != "Object" && owner != "object" {
                             stmt(out, "base();".into());
                         }
                         String::new()
                     } else {
                         format!("{obj}.{mname}({})", args.join(", "))
                     }
-                } else if owner == "String" && mname == "Concat" {
+                } else if (owner == "String" || owner == "string") && mname == "Concat" {
                     // String.Concat(a, b, c, ...) → a + b + c
                     args.join(" + ")
                 } else {
@@ -1893,6 +1907,22 @@ fn handle_instr(
                 stmt(out, format!("{tname}.{fname} = {val};"));
             }
         }
+        // Indirect load: pop a managed pointer, push the dereferenced value.
+        "ldind.i4" | "ldind.i8" | "ldind.r4" | "ldind.r8"
+        | "ldind.i" | "ldind.u" | "ldind.ref"
+        | "ldind.i1" | "ldind.u1" | "ldind.i2" | "ldind.u2"
+        | "ldind.u4" => {
+            let addr = pop(stack);
+            push(stack, format!("*{addr}"));
+        }
+        // Indirect store: pop a value and a managed pointer, store through.
+        "stind.i4" | "stind.i8" | "stind.r4" | "stind.r8"
+        | "stind.i" | "stind.ref"
+        | "stind.i1" | "stind.i2" => {
+            let val = pop(stack);
+            let addr = pop(stack);
+            stmt(out, format!("*{addr} = {val};"));
+        }
 
         // Object model
         "box" => {
@@ -1914,14 +1944,16 @@ fn handle_instr(
             if let Operand::Token(tok) = &ins.operand {
                 let t = type_token_name(reader, *tok);
                 let v = pop(stack);
-                push(stack, format!("({t})({v})"));
+                let v_s = strip_outer_parens(&v);
+                push(stack, format!("({t})({v_s})"));
             }
         }
         "isinst" => {
             if let Operand::Token(tok) = &ins.operand {
                 let t = type_token_name(reader, *tok);
                 let v = pop(stack);
-                push(stack, format!("({v} as {t})"));
+                let v_s = strip_outer_parens(&v);
+                push(stack, format!("{v_s} as {t}"));
             }
         }
         "newarr" => {

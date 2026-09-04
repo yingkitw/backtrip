@@ -181,6 +181,19 @@ namespace Shapes
             var list = new System.Collections.Generic.List<int> { 1, 2, 3 };
             return list;
         }
+
+        public string DescribeObject(object obj)
+        {
+            if (obj is string s)
+            {
+                return "String: " + s;
+            }
+            else if (obj is int n)
+            {
+                return "Int: " + n.ToString();
+            }
+            return "Unknown";
+        }
     }
 
     public struct Point

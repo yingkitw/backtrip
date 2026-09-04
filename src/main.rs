@@ -6,7 +6,8 @@ use roundtrip::{cil, decompile, error, metadata, output, pe};
 #[derive(Parser, Debug)]
 #[command(name = "roundtrip", version, about)]
 struct Cli {
-    /// Path to the .NET assembly (.dll / .exe) to decompile.
+    /// Path to the .NET assembly (.dll / .exe) to decompile, or a directory
+    /// when --recursive is used.
     assembly: PathBuf,
 
     /// Output directory for decompiled files.
@@ -29,6 +30,10 @@ struct Cli {
     /// (requires --type).
     #[arg(long)]
     stdout: bool,
+
+    /// Recursively decompile all .dll/.exe files in a directory.
+    #[arg(long)]
+    recursive: bool,
 }
 
 fn main() {
@@ -41,6 +46,16 @@ fn main() {
 fn run() -> error::Result<()> {
     let cli = Cli::parse();
 
+    // Recursive mode: decompile all .dll/.exe in a directory.
+    if cli.recursive {
+        return run_recursive(&cli);
+    }
+
+    decompile_one(&cli)
+}
+
+/// Decompile a single assembly file.
+fn decompile_one(cli: &Cli) -> error::Result<()> {
     let data = std::fs::read(&cli.assembly)?;
     let pe = pe::PeImage::parse(data)?;
     let (root, tables) = metadata::load(&pe)?;
@@ -96,6 +111,81 @@ fn run() -> error::Result<()> {
     }
     let n = output::write_types(&cli.output, &types)?;
     println!("Wrote {n} file(s) to {}", cli.output.display());
+    Ok(())
+}
+
+/// Recursively find and decompile all .dll/.exe files in a directory.
+fn run_recursive(cli: &Cli) -> error::Result<()> {
+    if !cli.assembly.is_dir() {
+        return Err(error::Error::Usage(
+            "--recursive requires a directory path".into(),
+        ));
+    }
+
+    // Collect all .dll and .exe files.
+    let mut assemblies: Vec<PathBuf> = Vec::new();
+    collect_assemblies(&cli.assembly, &mut assemblies)?;
+    assemblies.sort();
+
+    if assemblies.is_empty() {
+        eprintln!("No .dll or .exe files found in {}", cli.assembly.display());
+        return Ok(());
+    }
+
+    let total_files = 0;
+    let mut total_assemblies = 0;
+    let mut errors = 0;
+
+    for asm_path in &assemblies {
+        let rel = asm_path.strip_prefix(&cli.assembly).unwrap_or(asm_path);
+        let stem = rel.with_extension("").to_string_lossy().replace('/', "_");
+        let out_dir = cli.output.join(&stem);
+
+        // Clone the CLI args with this assembly and output dir.
+        let sub_cli = Cli {
+            assembly: asm_path.clone(),
+            output: out_dir,
+            il: cli.il,
+            list: false,
+            type_name: cli.type_name.clone(),
+            stdout: false,
+            recursive: false,
+        };
+
+        match decompile_one(&sub_cli) {
+            Ok(_) => {
+                total_assemblies += 1;
+            }
+            Err(e) => {
+                errors += 1;
+                eprintln!("Failed to decompile {}: {e}", asm_path.display());
+            }
+        }
+    }
+
+    println!(
+        "Decompiled {total_assemblies} assemblies ({} errors) to {}",
+        errors,
+        cli.output.display()
+    );
+    let _ = total_files;
+    Ok(())
+}
+
+/// Recursively collect .dll and .exe files from a directory.
+fn collect_assemblies(dir: &PathBuf, out: &mut Vec<PathBuf>) -> error::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_assemblies(&path, out)?;
+        } else if let Some(ext) = path.extension() {
+            let ext = ext.to_ascii_lowercase();
+            if ext == "dll" || ext == "exe" {
+                out.push(path);
+            }
+        }
+    }
     Ok(())
 }
 

@@ -51,9 +51,9 @@
 
 ## Next — decompiler quality
 
-- [ ] Type-name disambiguation: avoid collisions, emit `using` / full names
+- [x] Type-name disambiguation: avoid collisions, emit `using` / full names
 - [x] Remove redundant parentheses in expressions (precedence-aware printing)
-- [ ] Collapse `dup`/`pop` patterns into temporaries cleanly
+- [x] Collapse `dup`/`pop` patterns into temporaries cleanly
 - [x] Reconstruct `ref`/`out`/`in` parameters from `ByRef` + modreq
 - [x] Reconstruct `foreach` over `IEnumerable` from enumerator patterns
 - [x] Reconstruct `using` blocks from `IDisposable` patterns
@@ -67,11 +67,12 @@
 - [ ] `async`/`await` state-machine recognition and reversal
 - [ ] Lambda / closure reconstruction (display classes)
 - [ ] `yield` iterator state-machine reversal
-- [ ] `switch` expressions, pattern matching, `is` patterns
+- [x] `is` patterns and `as` operator rendering (isinst/castclass cleanup)
+- [ ] `switch` expressions, pattern matching
 
 ## Next — tooling
 
-- [ ] Recursive multi-assembly decompilation (`--recursive` on a directory)
+- [x] Recursive multi-assembly decompilation (`--recursive` on a directory)
 - [ ] Round-trip: recompile decompiled output and diff IL (verification)
 
 ## Brainstorming (competitive intelligence)

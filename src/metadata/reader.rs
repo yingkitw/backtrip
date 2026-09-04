@@ -4,6 +4,37 @@ use crate::metadata::streams::MetadataRoot;
 use crate::metadata::tables::{decode_coded, Coded, CodedIndex, Tables, tbl};
 use crate::pe::{CliHeader, PeImage};
 
+/// Map well-known FCL type names to C# keywords and clean up arity suffixes.
+/// `System.Int32` → `int`, `System.String` → `string`,
+/// `System.Collections.Generic.List`1` → `System.Collections.Generic.List`
+fn clean_type_name(full: &str) -> String {
+    // Strip backtick arity suffix: `List`1` → `List`
+    let without_arity = if let Some(bt) = full.find('`') {
+        &full[..bt]
+    } else {
+        full
+    };
+    // Map well-known FCL types to C# keywords.
+    match without_arity {
+        "System.Object" => "object".into(),
+        "System.String" => "string".into(),
+        "System.Boolean" => "bool".into(),
+        "System.Char" => "char".into(),
+        "System.SByte" => "sbyte".into(),
+        "System.Byte" => "byte".into(),
+        "System.Int16" => "short".into(),
+        "System.UInt16" => "ushort".into(),
+        "System.Int32" => "int".into(),
+        "System.UInt32" => "uint".into(),
+        "System.Int64" => "long".into(),
+        "System.UInt64" => "ulong".into(),
+        "System.Single" => "float".into(),
+        "System.Double" => "double".into(),
+        "System.Void" => "void".into(),
+        _ => without_arity.to_string(),
+    }
+}
+
 /// High-level metadata access.
 pub struct Reader<'a> {
     pub pe: &'a PeImage,
@@ -541,7 +572,7 @@ impl<'a> Reader<'a> {
                 if let Some(r) = self.tables.get(tbl::TYPEDEF).get(ci.row as usize - 1) {
                     let ns = self.type_def_namespace(r);
                     let name = self.type_def_name(r);
-                    qualify(ns, name)
+                    clean_type_name(&qualify(ns, name))
                 } else {
                     "?".into()
                 }
@@ -550,7 +581,7 @@ impl<'a> Reader<'a> {
                 if let Some(r) = self.tables.get(tbl::TYPEREF).get(ci.row as usize - 1) {
                     let ns = self.type_ref_namespace(r);
                     let name = self.type_ref_name(r);
-                    qualify(ns, name)
+                    clean_type_name(&qualify(ns, name))
                 } else {
                     "?".into()
                 }

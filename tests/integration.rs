@@ -354,6 +354,72 @@ fn decompiles_collection_initializer() {
 }
 
 #[test]
+fn decompiles_ref_param_body() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // ref parameter body: Swap should use dereference syntax, not unsupported comments.
+    assert!(calc.source.contains("V_0 = *a;"),
+        "ldind not rendered;\n{}", calc.source);
+    assert!(calc.source.contains("*a = *b;"),
+        "stind not rendered;\n{}", calc.source);
+    // Must not have unsupported comments for ldind/stind.
+    assert!(!calc.source.contains("unsupported: ldind"),
+        "ldind should be supported;\n{}", calc.source);
+    assert!(!calc.source.contains("unsupported: stind"),
+        "stind should be supported;\n{}", calc.source);
+}
+
+#[test]
+fn decompiles_type_name_cleanup() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // FCL types should map to C# keywords.
+    assert!(calc.source.contains("new object()"),
+        "Object should map to object keyword;\n{}", calc.source);
+    // No backtick in generic type names.
+    assert!(!calc.source.contains("`1<"),
+        "backtick arity should be stripped;\n{}", calc.source);
+    // No System. prefix (should be stripped).
+    assert!(!calc.source.contains("System."),
+        "System. prefix should be stripped;\n{}", calc.source);
+    // Generic types should render cleanly.
+    assert!(calc.source.contains("List<int>"),
+        "generic type should render cleanly;\n{}", calc.source);
+}
+
+#[test]
+fn decompiles_is_as_patterns() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // isinst should render as `as` pattern without redundant parens.
+    assert!(calc.source.contains("obj as string"),
+        "as pattern missing;\n{}", calc.source);
+    // No double negation from brfalse + if/else restructuring.
+    assert!(!calc.source.contains("!(!"),
+        "double negation should be eliminated;\n{}", calc.source);
+    // ldloca should not render as `ref` for method calls.
+    assert!(calc.source.contains("V_1.ToString()"),
+        "ldloca method call should not have ref;\n{}", calc.source);
+    assert!(!calc.source.contains("ref V_1.ToString()"),
+        "ldloca should not render as ref for method calls;\n{}", calc.source);
+}
+
+#[test]
 fn decompiles_struct_point() {
     let (_pe, root, tables) = load_reader();
     let reader = Reader::new(&_pe, &root, &tables).unwrap();
@@ -550,4 +616,36 @@ fn il_disasm_resolves_ldstr_and_locals() {
     // Locals should be named V_0 etc. and declared in a .locals header.
     assert!(il.contains(".locals init"), "missing .locals header; got:\n{il}");
     assert!(il.contains("V_0"), "locals not named V_0; got:\n{il}");
+}
+
+#[test]
+fn cli_recursive_decompiles_directory() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/bin/Release/net8.0");
+    let out_dir = std::env::temp_dir().join("roundtrip_recursive_test");
+    // Clean up any previous run.
+    let _ = std::fs::remove_dir_all(&out_dir);
+
+    let out = std::process::Command::new(roundtrip_bin())
+        .arg(&dir)
+        .arg("--recursive")
+        .arg("-o")
+        .arg(&out_dir)
+        .output()
+        .expect("run roundtrip");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Decompiled 1 assemblies"),
+        "should decompile 1 assembly; got:\n{stdout}");
+    // The output directory should contain a subdirectory for the assembly.
+    let sample_dir = out_dir.join("Sample");
+    assert!(sample_dir.exists(), "Sample output dir should exist");
+    // Should contain decompiled .cs files.
+    let entries: Vec<_> = std::fs::read_dir(&sample_dir).unwrap().collect();
+    assert!(!entries.is_empty(), "should have decompiled files");
+    // Verify at least one .cs file exists.
+    let has_cs = entries.iter().any(|e| {
+        e.as_ref().unwrap().path().extension().map_or(false, |ext| ext == "cs")
+    });
+    assert!(has_cs, "should have .cs files in output");
 }
