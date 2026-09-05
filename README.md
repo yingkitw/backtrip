@@ -13,6 +13,39 @@ provides IL disassembly, obfuscation detection, structural verification, and
 JSON metadata export — all from a single fast native binary with zero runtime
 dependencies.
 
+## Why backtrip?
+
+Most .NET decompilers are large, C#-based tools that require a .NET runtime
+and, in the common case, a desktop GUI (ILSpy, dnSpy, dotPeek). backtrip
+deliberately takes the opposite trade-off:
+
+- **One native binary, zero runtime dependencies** — written in Rust, it
+  parses PE/CLI metadata and CIL directly. No .NET runtime, no JVM, no GUI:
+  it runs anywhere Cargo does and finishes in milliseconds.
+- **Scriptable and composable** — a real CLI (`--json`, `--list`, `--type`,
+  `--recursive`) plus a small library API. Decompilation, IL disassembly, and
+  metadata extraction pipe cleanly into diffs, CI pipelines, and custom
+  analysis tools.
+- **Verifiable fidelity** — the round-trip test decompiles a real assembly,
+  recompiles the emitted C# with `dotnet`, and re-decompiles the result: the
+  output must build with zero errors and reach a fixed point (identical
+  output up to label renumbering). When the decompiler cannot confidently
+  reconstruct control flow, it emits `goto` labels or a comment rather than
+  plausible-looking but incorrect C#.
+- **Analysis built in** — obfuscation detection, structural verification
+  (`--verify`), and JSON export are first-class features, not afterthoughts.
+- **Lightweight by design** — one dependency (`clap`), a small footprint, and
+  fast incremental builds.
+
+**When to reach for backtrip**: quick inspection on any machine; batch or
+recursive analysis of many assemblies; CI gates that must prove metadata
+survives decompilation; machine-readable extraction via JSON; headless
+pipelines. **When to reach for ILSpy / dnSpy / dotPeek**: interactive
+browsing, debugger-integrated inspection, or when you need the last few
+percent of C# reconstruction — `async`/`await` and `yield` state machines and
+full pattern matching are not there yet (see
+[Limitations](#limitations--roadmap)).
+
 ## Features
 
 ### .NET Metadata & IL Parsing
@@ -213,21 +246,35 @@ backtrip works in three stages:
 
 ## Comparison with Other Tools
 
-| Feature | backtrip | ILSpy | dnSpy | dotPeek |
-| ------- | --------- | ----- | ----- | ------- |
-| Language | Rust | C# | C# | C# |
-| CLI tool | Yes | Yes | No (GUI) | No (GUI) |
-| IL disassembly | Yes | Yes | Yes | Yes |
-| C# decompilation | Partial | Full | Full | Full |
-| JSON export | Yes | No | No | No |
-| Obfuscation detection | Yes | No | No | No |
-| Structural verification | Yes | No | No | No |
-| Recursive batch mode | Yes | Yes | No | No |
-| .NET runtime required | No | Yes | Yes | Yes |
+| Feature | backtrip | ildasm | ILSpy | dnSpy | dotPeek |
+| ------- | --------- | ------ | ----- | ----- | ------- |
+| Language | Rust | C++/CLI | C# | C# | C# |
+| License | Apache-2.0 | MS | MIT | MIT | Proprietary (free) |
+| CLI tool | Yes | Yes | Yes (`ilspycmd`) | No (GUI) | No (GUI) |
+| IL disassembly | Yes | Yes | Yes | Yes | Yes |
+| C# decompilation | Partial | No | Full | Full | Full |
+| Zero runtime dependencies | Yes | No (SDK) | No (.NET) | No (.NET) | No (.NET) |
+| Round-trip compile gate | Yes | No | No | No | No |
+| JSON export | Yes | No | No | No | No |
+| Obfuscation detection | Yes | No | No | No | No |
+| Structural verification | Yes | No | No | No | No |
+| Recursive batch mode | Yes | No | Yes | No | No |
 
-backtrip differentiates itself by being a lightweight, dependency-free native
-binary with unique analysis features (obfuscation detection, verification,
-JSON export) that complement traditional decompilers.
+**Where each tool fits**:
+
+- **ildasm** — the reference IL disassembler shipped with the .NET SDK.
+  IL only; no C# reconstruction. Good for checking what the compiler
+  actually emitted.
+- **ILSpy / ilspycmd** — the open-source standard for C# decompilation.
+  Excellent output quality, actively developed, usable as a library and a
+  CLI. The benchmark to beat for reconstruction fidelity.
+- **dnSpy** — ILSpy-derived; adds a debugger and assembly editing. GUI-only.
+- **dotPeek** — JetBrains' free decompiler. Polished GUI plus PDB
+  generation; Windows-centric.
+- **backtrip** — a headless, dependency-free alternative with verification
+  tooling the GUI tools lack. Choose it where a native binary, scripting, or
+  CI integration matters more than maximum C# fidelity — and use the
+  round-trip gate to *prove* the output compiles.
 
 ## Limitations & Roadmap
 
