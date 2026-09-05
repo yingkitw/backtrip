@@ -212,6 +212,22 @@ namespace Shapes
             return (string)o;
         }
 
+        public int SumAll(params int[] xs)
+        {
+            return xs.Length;
+        }
+
+        public Counter BuildCounter(int n)
+        {
+            return new Counter { Count = n };
+        }
+
+        public Point MakePoint(int x, int y)
+        {
+            var p = new Point { X = x, Y = y };
+            return p;
+        }
+
         public string DescribeObject(object obj)
         {
             if (obj is string s)

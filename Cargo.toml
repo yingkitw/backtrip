@@ -1,8 +1,8 @@
 [package]
 name = "backtrip"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
-description = "A .NET IL decompiler and CIL disassembler written in Rust — converts .NET assemblies (.dll/.exe) back to readable C# source code or IL disassembly"
+description = "A .NET IL decompiler and CIL disassembler in Rust — turns .NET assemblies (.dll/.exe) back into readable, recompilable C# or IL disassembly, with round-trip verification"
 license = "Apache-2.0"
 keywords = [
     "decompiler",

@@ -347,9 +347,11 @@ fn decompiles_using_block() {
         .iter()
         .find(|t| t.file_name.contains("Calculator"))
         .expect("Calculator file");
-    // using: should render `using (V_0 = new IO.StreamReader(path)) {`
-    assert!(calc.source.contains("using (V_0 = new IO.StreamReader(path)) {"),
+    // using: should render `using (V_0 = new StreamReader(path)) {`
+    assert!(calc.source.contains("using (V_0 = new StreamReader(path)) {"),
         "using block missing;\n{}", calc.source);
+    assert!(!calc.source.contains("IO.StreamReader"),
+        "StreamReader should not keep a partial namespace;\n{}", calc.source);
     // Must not render as Dispose() in a finally block.
     assert!(!calc.source.contains(".Dispose()"),
         "should use using, not Dispose;\n{}", calc.source);
@@ -364,9 +366,13 @@ fn decompiles_foreach() {
         .iter()
         .find(|t| t.file_name.contains("Calculator"))
         .expect("Calculator file");
-    // foreach: should render `foreach (var V_2 in numbers) {`
+    // foreach: should render `foreach (var V_2 in numbers) {` and the
+    // metadata declaration of V_2 must be suppressed (C# forbids both).
     assert!(calc.source.contains("foreach (var V_2 in numbers) {"),
         "foreach block missing;\n{}", calc.source);
+    let body = calc.source.lines().filter(|l| !l.starts_with("using ")).collect::<Vec<_>>().join("\n");
+    assert!(!body.contains("int V_2 = default;"),
+        "foreach variable should not be redeclared;\n{}", calc.source);
     // Must not render as GetEnumerator/MoveNext/get_Current.
     assert!(!calc.source.contains("GetEnumerator()"),
         "should use foreach, not GetEnumerator;\n{}", calc.source);
@@ -392,6 +398,28 @@ fn decompiles_collection_initializer() {
 }
 
 #[test]
+fn decompiles_object_initializer() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // Class object initializer: newobj + dup + stfld collapse to `{ ... }`.
+    assert!(calc.source.contains("V_tmp_0 = new Shapes.Counter { Count = n };"),
+        "class object initializer missing;\n{}", calc.source);
+    // Struct object initializer: default(T) + stfld collapse too.
+    assert!(calc.source.contains("V_0 = new Shapes.Point { X = x, Y = y };"),
+        "struct object initializer missing;\n{}", calc.source);
+    // The standalone member-set lines must be gone.
+    assert!(!calc.source.contains("V_tmp_0.Count = n;"),
+        "standalone assignment should be collapsed;\n{}", calc.source);
+    assert!(!calc.source.contains("V_0.X = x;"),
+        "standalone X assignment should be collapsed;\n{}", calc.source);
+}
+
+#[test]
 fn decompiles_ref_param_body() {
     let (_pe, root, tables) = load_reader();
     let reader = Reader::new(&_pe, &root, &tables).unwrap();
@@ -400,11 +428,14 @@ fn decompiles_ref_param_body() {
         .iter()
         .find(|t| t.file_name.contains("Calculator"))
         .expect("Calculator file");
-    // ref parameter body: Swap should use dereference syntax, not unsupported comments.
-    assert!(calc.source.contains("V_0 = *a;"),
-        "ldind not rendered;\n{}", calc.source);
-    assert!(calc.source.contains("*a = *b;"),
-        "stind not rendered;\n{}", calc.source);
+    // ref parameter body: Swap should read/write the parameter directly
+    // (C# ref params are the value, not a pointer).
+    assert!(calc.source.contains("V_0 = a;"),
+        "ldind on ref param should be plain;\n{}", calc.source);
+    assert!(calc.source.contains("a = b;"),
+        "stind on ref param should be plain;\n{}", calc.source);
+    assert!(calc.source.contains("b = V_0;"),
+        "stind on ref param should be plain;\n{}", calc.source);
     // Must not have unsupported comments for ldind/stind.
     assert!(!calc.source.contains("unsupported: ldind"),
         "ldind should be supported;\n{}", calc.source);
@@ -427,12 +458,16 @@ fn decompiles_type_name_cleanup() {
     // No backtick in generic type names.
     assert!(!calc.source.contains("`1<"),
         "backtick arity should be stripped;\n{}", calc.source);
-    // No System. prefix (should be stripped).
-    assert!(!calc.source.contains("System."),
+    // No System.-qualified names in the body (the using directives at the
+    // top legitimately mention System namespaces, so check body lines only).
+    let body = calc.source.lines().filter(|l| !l.starts_with("using ")).collect::<Vec<_>>().join("\n");
+    assert!(!body.contains("System."),
         "System. prefix should be stripped;\n{}", calc.source);
-    // Generic types should render cleanly.
+    // Generic types should render cleanly (simple name, no Collections.Generic).
     assert!(calc.source.contains("List<int>"),
         "generic type should render cleanly;\n{}", calc.source);
+    assert!(!calc.source.contains("Collections.Generic.List"),
+        "generic type should not keep a partial namespace;\n{}", calc.source);
 }
 
 #[test]
@@ -476,6 +511,28 @@ fn decompiles_display_class_cleanup() {
         "lambda method name should be cleaned up;\n{}", calc.source);
     assert!(!calc.source.contains("b__0"),
         "raw lambda method name should not appear;\n{}", calc.source);
+}
+
+#[test]
+fn decompiles_lambda_inlining() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // Closure inlining: display class + Func ctor + Invoke → lambda expression,
+    // with the captured field (`this.offset`) substituted by its value.
+    assert!(calc.source.contains("return ((int x) => x + offset)(10);"),
+        "lambda not inlined;\n{}", calc.source);
+    // The display-class construction and Func delegate must be gone.
+    assert!(!calc.source.contains("new DisplayClass"),
+        "display class construction should be inlined away;\n{}", calc.source);
+    assert!(!calc.source.contains("new Func<int, int>"),
+        "Func ctor should be inlined away;\n{}", calc.source);
+    assert!(!calc.source.contains(".Invoke("),
+        "delegate Invoke should be inlined;\n{}", calc.source);
 }
 
 #[test]
@@ -525,7 +582,7 @@ fn decompiles_nested_type_inside_parent() {
         .expect("Calculator file");
     assert!(calc.source.contains("class Settings"), "nested Settings class missing;\n{}", calc.source);
     assert!(calc.source.contains("public Settings(string label)"), "nested Settings ctor missing");
-    assert!(calc.source.contains("this.Enabled = 1"), "nested Settings ctor body missing");
+    assert!(calc.source.contains("this.Enabled = true"), "nested Settings ctor body missing");
 }
 
 #[test]
@@ -581,8 +638,10 @@ fn decompiles_abstract_class_hierarchy() {
         .iter()
         .find(|t| t.file_name.ends_with("_Circle.cs"))
         .expect("Circle file");
-    assert!(circle.source.contains("public class Circle : Shapes.Shape"),
-        "base class missing;\n{}", circle.source);
+    assert!(circle.source.contains("public class Circle : Shape"),
+        "base class should use the simple name;\n{}", circle.source);
+    assert!(!circle.source.contains("Circle : Shapes.Shape"),
+        "same-namespace base should not keep the namespace prefix;\n{}", circle.source);
     assert!(circle.source.contains("public Circle(double r)"),
         "Circle ctor missing;\n{}", circle.source);
     assert!(circle.source.contains("public override double Area()"),
@@ -618,16 +677,19 @@ fn decompiles_generic_class_and_method() {
     // Class-level generic params render from the GenericParam table names.
     assert!(box_.source.contains("public class Box<T>"),
         "generic class missing;\n{}", box_.source);
-    // Class generic params appear as T0 in member signatures (index-based).
-    assert!(box_.source.contains("public T0 Item;"),
+    // Class generic params resolve to their names in member signatures.
+    assert!(box_.source.contains("public T Item;"),
         "generic field missing;\n{}", box_.source);
-    assert!(box_.source.contains("public Box(T0 item)"),
+    assert!(box_.source.contains("public Box(T item)"),
         "generic ctor missing;\n{}", box_.source);
-    assert!(box_.source.contains("public T0 Get()"),
+    assert!(box_.source.contains("public T Get()"),
         "generic method return missing;\n{}", box_.source);
-    // Method-level generic: <U> decl + !!0 in the signature.
-    assert!(box_.source.contains("public !!0 Map<U>(Func<T0, !!0> f)"),
+    // Method-level generic: <U> decl + U in the signature and GenericInst.
+    assert!(box_.source.contains("public U Map<U>(Func<T, U> f)"),
         "generic method signature missing;\n{}", box_.source);
+    // No index-based generic fallbacks (T0/!!0) anywhere.
+    assert!(!box_.source.contains("T0") && !box_.source.contains("!!0"),
+        "generic params should render by name;\n{}", box_.source);
     assert!(box_.source.contains("f.Invoke(this.Item)"),
         "delegate invocation missing;\n{}", box_.source);
     // No raw arity backticks anywhere in the rendered source.
@@ -726,6 +788,23 @@ fn decompiles_boxing_and_casting() {
 }
 
 #[test]
+fn decompiles_params_parameter() {
+    let (_pe, root, tables) = load_reader();
+    let reader = Reader::new(&_pe, &root, &tables).unwrap();
+    let types = decompile_assembly(&reader).unwrap();
+    let calc = types
+        .iter()
+        .find(|t| t.file_name.contains("Calculator"))
+        .expect("Calculator file");
+    // params: [ParamArray] on the param → `params int[] xs`.
+    assert!(calc.source.contains("public int SumAll(params int[] xs)"),
+        "params parameter missing;\n{}", calc.source);
+    // The ParamArray attribute itself must not leak into the output.
+    assert!(!calc.source.contains("ParamArray"),
+        "ParamArray attribute should be hidden;\n{}", calc.source);
+}
+
+#[test]
 fn cil_decoder_round_trip_sizes() {
     // A tiny method body: ldarg.1, ldarg.2, add, ret.
     let code = [0x03_u8, 0x04, 0x58, 0x2A];
@@ -793,6 +872,64 @@ fn compressed_uint_decoding() {
 
 fn backtrip_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_backtrip"))
+}
+
+#[test]
+fn roundtrip_recompiles_decompiled_output() {
+    // Dedicated round-trip fixture: decompile Roundtrip.dll, recompile the
+    // output with the .NET SDK, and re-decompile the result. The decompiled
+    // C# must build (validating name resolution, using directives, and
+    // statement rendering), and the recompiled assembly must expose the same
+    // type set (validating structural fidelity).
+    let dll = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/roundtrip/bin/Release/net8.0/Roundtrip.dll");
+    let data = std::fs::read(&dll).expect("read roundtrip dll");
+    let pe = PeImage::parse(data).expect("parse PE");
+    let (root, tables) = load(&pe).expect("load metadata");
+    let reader = Reader::new(&pe, &root, &tables).expect("build reader");
+    let types = decompile_assembly(&reader).expect("decompile roundtrip fixture");
+    assert!(!types.is_empty(), "should decompile the roundtrip fixture");
+
+    let dir = std::env::temp_dir().join("backtrip_roundtrip_recompile_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let csproj = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/roundtrip/roundtrip.csproj"),
+    )
+    .expect("read roundtrip csproj");
+    std::fs::write(dir.join("Roundtrip.csproj"), csproj).unwrap();
+    for t in &types {
+        std::fs::write(dir.join(&t.file_name), &t.source).unwrap();
+    }
+
+    let out = std::process::Command::new("dotnet")
+        .arg("build")
+        .arg(dir.join("Roundtrip.csproj"))
+        .arg("-v")
+        .arg("q")
+        .output()
+        .expect("run dotnet build");
+    assert!(
+        out.status.success(),
+        "decompiled output failed to compile:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Re-decompile the recompiled assembly — the same type set must appear.
+    let dll2 = dir.join("bin/Debug/net8.0/Roundtrip.dll");
+    let data2 = std::fs::read(&dll2).expect("read recompiled dll");
+    let pe2 = PeImage::parse(data2).expect("parse recompiled PE");
+    let (root2, tables2) = load(&pe2).expect("load recompiled metadata");
+    let reader2 = Reader::new(&pe2, &root2, &tables2).expect("build recompiled reader");
+    let types2 = decompile_assembly(&reader2).expect("re-decompile");
+    assert_eq!(
+        types.len(),
+        types2.len(),
+        "recompiled assembly should expose the same type count"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

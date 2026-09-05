@@ -1,5 +1,7 @@
 # backtrip — .NET Decompiler & CIL Disassembler in Rust
 
+[![crates.io](https://img.shields.io/crates/v/backtrip.svg)](https://crates.io/crates/backtrip)
+[![docs.rs](https://docs.rs/backtrip/badge.svg)](https://docs.rs/backtrip)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Rust Edition](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org/)
 [![Build](https://img.shields.io/badge/build-cargo%20test-green.svg)](#tests)
@@ -29,6 +31,9 @@ dependencies.
 - **String literals, numeric constants, arguments, and locals**
 - **Instance/static field access, array element access, `newarr`/`ldlen`**
 - **Method calls** — `call` / `callvirt` / `newobj` with argument reconstruction
+- **`ref` / `out` parameters** — ByRef params render with correct semantics and call-site keywords
+- **`params` arrays** — `[ParamArray]` renders as `params int[] xs`; vararg signatures render their sentinel as `...`
+- **Lambda inlining** — display class + `Func`/`Action` construction + `Invoke` collapse to a lambda expression with captured variables (`((int x) => x + offset)(10)`)
 - **Type operations** — `box` / `unbox.any` / `castclass` / `isinst` (`is`/`as`)
 - **Constructors** with access modifiers, `static` / `virtual` / `override` / `abstract`
 - **Type kinds** — class / struct / interface / enum / delegate detection
@@ -47,9 +52,15 @@ dependencies.
 - **`using` blocks** — detected from `try`/`finally` + `Dispose()` pattern
 - **`foreach` loops** — detected from `GetEnumerator` + `MoveNext` + `Current` pattern
 - **Collection initializers** — `new List()` + `.Add()` calls collapsed to `{ ... }`
+- **Object initializers** — `new T() { Prop = v }` collapsed from `new`/`default` + member sets
 
 ### Tooling & Analysis
 
+- **Compilable output** — `using` directives inferred from the assembly's
+  type references (`System`, `System.IO`, ...), `System.*` names rendered as
+  simple names, and correct statement forms (ref/out params, property
+  accessors, foreach variables, bool literals, `base()` initializers) so the
+  decompiled C# rebuilds under `dotnet` — validated by the round-trip test
 - **Recursive multi-assembly decompilation** — `--recursive` decompiles all
   `.dll`/`.exe` files in a directory
 - **JSON metadata export** — `--json` outputs a structured model of types,
@@ -60,6 +71,14 @@ dependencies.
   from metadata appear in the decompiled output
 
 ## Install
+
+From [crates.io](https://crates.io/crates/backtrip):
+
+```bash
+cargo install backtrip
+```
+
+Or build from source:
 
 ```bash
 cargo build --release
@@ -138,9 +157,12 @@ src/
   output.rs           per-type file writer
   main.rs             CLI (clap)
   lib.rs              library root (for integration tests)
+examples/
+  decompile.rs        library-usage example (parse → decompile → print)
 tests/
-  integration.rs      end-to-end tests against a sample .NET assembly
-  fixtures/           sample C# project used as a test fixture
+  integration.rs      end-to-end tests against the Sample.dll fixture
+  fixtures/           Sample.cs (fragment assertions)
+  fixtures/roundtrip/ Roundtrip.cs (round-trip compile test fixture)
 ```
 
 ## Tests
@@ -155,6 +177,12 @@ C# fragments — including control flow, switch statements, switch expressions,
 try/catch, using blocks, foreach, properties, events, delegates, nested types,
 enums, interfaces, abstract/virtual/override hierarchies, generic classes and
 methods, static constructors, arrays, and box/unbox/castclass conversions.
+
+A second fixture (`tests/fixtures/roundtrip/Roundtrip.cs`) drives the
+**round-trip test**: the decompiled output is recompiled with `dotnet` and
+must build (0 errors), then the recompiled assembly is re-decompiled and must
+expose the same type set. This validates that the emitted C# is actually
+compilable — usings, name resolution, and statement rendering.
 
 ## Library Usage
 
@@ -207,11 +235,9 @@ See [`TODO.md`](TODO.md) for the full roadmap. Notable upcoming work:
 
 - `async` / `await` state-machine recognition and reversal
 - `yield` iterator state-machine reversal
-- Lambda / closure full inlining (display class → lambda expression)
 - Switch expressions with type patterns and property patterns
-- Object initializers (`new T() { Prop = v }` collapse)
-- Generic parameters rendered by name (`T`/`U`) instead of index-based `T0`/`!!0`
-- Full round-trip verification (recompile + IL diff)
+- Round-trip IL diffing (recompiled IL never matches exactly; semantic
+  comparison is future work)
 
 ## License
 

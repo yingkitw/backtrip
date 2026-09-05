@@ -285,3 +285,35 @@ pub fn parse_property_sig(blob: &[u8]) -> Result<Type> {
     let _param_count = c.read_uint()?;
     read_type(&mut c)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_vararg_sentinel() {
+        // ECMA-335 II.23.2.4 example: `void v(string a, ..., int b)`.
+        // CallConv vararg (0x05), ParamCount = 2 (string + int, sentinel not
+        // counted), ret void (0x01), string (0x0E), SENTINEL (0x41), int32.
+        let blob = [0x05, 0x02, 0x01, 0x0E, 0x41, 0x08];
+        let sig = parse_method_sig(&blob).unwrap();
+        assert_eq!(sig.calling_convention, 5);
+        assert!(matches!(sig.ret_type, Type::Void));
+        assert_eq!(sig.param_types.len(), 3);
+        assert!(matches!(sig.param_types[0], Type::String));
+        assert!(matches!(sig.param_types[1], Type::Sentinel));
+        assert!(matches!(sig.param_types[2], Type::I4));
+    }
+
+    #[test]
+    fn parses_plain_method_sig() {
+        // `int Add(int a, int b)`: default call conv, count 2, ret int32.
+        let blob = [0x00, 0x02, 0x08, 0x08, 0x08];
+        let sig = parse_method_sig(&blob).unwrap();
+        assert_eq!(sig.calling_convention, 0);
+        assert!(matches!(sig.ret_type, Type::I4));
+        assert_eq!(sig.param_types.len(), 2);
+        assert!(matches!(sig.param_types[0], Type::I4));
+        assert!(matches!(sig.param_types[1], Type::I4));
+    }
+}

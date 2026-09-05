@@ -2,5 +2,7 @@
 /decompiled
 tests/fixtures/bin
 tests/fixtures/obj
+tests/fixtures/roundtrip/bin
+tests/fixtures/roundtrip/obj
 AGENTS.md
 MEMORY.md

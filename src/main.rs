@@ -2,7 +2,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use backtrip::{cil, decompile, error, metadata, output, pe};
 
-/// backtrip - a .NET decompiler written in Rust.
+/// backtrip - a .NET IL decompiler and CIL disassembler in Rust.
 #[derive(Parser, Debug)]
 #[command(name = "backtrip", version, about)]
 struct Cli {

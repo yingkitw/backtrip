@@ -1,0 +1,12 @@
+/Users/yingkitw/Desktop/myproject/backtrip/roundtrip_rt/recompile/obj/Release/net8.0/recompile.GeneratedMSBuildEditorConfig.editorconfig
+/Users/yingkitw/Desktop/myproject/backtrip/roundtrip_rt/recompile/obj/Release/net8.0/recompile.AssemblyInfoInputs.cache
+/Users/yingkitw/Desktop/myproject/backtrip/roundtrip_rt/recompile/obj/Release/net8.0/recompile.AssemblyInfo.cs
+/Users/yingkitw/Desktop/myproject/backtrip/roundtrip_rt/recompile/obj/Release/net8.0/recompile.csproj.CoreCompileInputs.cache
+/Users/yingkitw/Desktop/myproject/backtrip/roundtrip_rt/recompile/obj/Release/net8.0/recompile.sourcelink.json
+/Users/yingkitw/Desktop/myproject/backtrip/roundtrip_rt/recompile/bin/Release/net8.0/RoundtripStep2.deps.json
+/Users/yingkitw/Desktop/myproject/backtrip/roundtrip_rt/recompile/bin/Release/net8.0/RoundtripStep2.dll
+/Users/yingkitw/Desktop/myproject/backtrip/roundtrip_rt/recompile/bin/Release/net8.0/RoundtripStep2.pdb
+/Users/yingkitw/Desktop/myproject/backtrip/roundtrip_rt/recompile/obj/Release/net8.0/RoundtripStep2.dll
+/Users/yingkitw/Desktop/myproject/backtrip/roundtrip_rt/recompile/obj/Release/net8.0/refint/RoundtripStep2.dll
+/Users/yingkitw/Desktop/myproject/backtrip/roundtrip_rt/recompile/obj/Release/net8.0/RoundtripStep2.pdb
+/Users/yingkitw/Desktop/myproject/backtrip/roundtrip_rt/recompile/obj/Release/net8.0/ref/RoundtripStep2.dll

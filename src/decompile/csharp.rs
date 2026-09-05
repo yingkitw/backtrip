@@ -101,14 +101,22 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
     };
 
     let generics = reader.generic_params_for(CodedIndex { table: Some(tbl::TYPEDEF), row: row_idx });
-    let generic_decl = if generics.is_empty() {
+    let class_generic_names: Vec<String> = generics.iter().map(|(_, n)| n.clone()).collect();
+    let generic_decl = if class_generic_names.is_empty() {
         String::new()
     } else {
-        let names: Vec<String> = generics.iter().map(|(_, n)| n.clone()).collect();
-        format!("<{}>", names.join(", "))
+        format!("<{}>", class_generic_names.join(", "))
     };
 
     let mut s = String::new();
+    // `using` directives must precede the file-scoped namespace declaration.
+    let usings = reader.external_namespaces();
+    for u in &usings {
+        s.push_str(&format!("using {u};\n"));
+    }
+    if !usings.is_empty() {
+        s.push('\n');
+    }
     if !ns.is_empty() {
         s.push_str(&format!("namespace {ns};\n\n"));
     }
@@ -118,14 +126,31 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
         s.push_str(&format!("    {}\n", format_attr_line(name, args)));
     }
     let mut keywords = Vec::new();
+    // Static class: abstract + sealed with no instance constructor
+    // (ECMA-335 II.22.37 — the C# `static` keyword has no dedicated flag).
+    let has_instance_ctor = reader.type_method_rows(row_idx).any(|mi| {
+        let m = &reader.tables.get(tbl::METHODDEF)[mi];
+        reader.method_name(m) == ".ctor" && reader.method_flags(m) & 0x0010 == 0
+    });
+    let is_static_class = is_abstract
+        && is_sealed
+        && !is_interface
+        && !is_struct
+        && !is_enum
+        && !is_delegate
+        && !has_instance_ctor;
     if !access.is_empty() {
         keywords.push(access.to_string());
     }
-    if is_abstract && !is_interface && !is_struct && !is_delegate {
-        keywords.push("abstract".into());
-    }
-    if is_sealed && !is_interface && !is_struct && !is_enum && !is_delegate {
-        keywords.push("sealed".into());
+    if is_static_class {
+        keywords.push("static".into());
+    } else {
+        if is_abstract && !is_interface && !is_struct && !is_delegate {
+            keywords.push("abstract".into());
+        }
+        if is_sealed && !is_interface && !is_struct && !is_enum && !is_delegate {
+            keywords.push("sealed".into());
+        }
     }
     keywords.push(kind.to_string());
 
@@ -142,11 +167,11 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
             }
         });
         if let Some((sig, mi)) = invoke {
-            let ret_type = strip_system(&reader.type_name(&sig.ret_type));
+            let ret_type = strip_system(&reader.type_name_ctx(&sig.ret_type, &class_generic_names, &[]));
             let param_names = method_param_names(reader, (mi + 1) as u32, &sig, false);
             let params: Vec<String> = sig.param_types.iter().enumerate().map(|(i, t)| {
                 let pname = param_names.get(i).cloned().unwrap_or_else(|| format!("arg{i}"));
-                format!("{} {}", strip_system(&reader.type_name(t)), pname)
+                format!("{} {}", strip_system(&reader.type_name_ctx(t, &class_generic_names, &[])), pname)
             }).collect();
             s.push_str(&format!("{} delegate {} {}{}({});\n",
                 access, ret_type, name, generic_decl, params.join(", ")));
@@ -161,7 +186,13 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
     let mut bases: Vec<String> = Vec::new();
     if !is_interface && !is_struct && !is_enum {
         if !base_full.is_empty() && base_simple != "Object" && base_simple != "object" {
-            bases.push(base_full.clone());
+            // Same-namespace base → simple name; otherwise keep the
+            // qualified name (System-prefix stripped).
+            if base_type_namespace(reader, extends).as_deref() == Some(ns.as_str()) {
+                bases.push(simple_name(&base_full));
+            } else {
+                bases.push(base_full.clone());
+            }
         }
     }
     // Interface implementations.
@@ -226,7 +257,7 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
             continue;
         }
         let fflags = reader.field_flags(f);
-        let ftype = reader.field_type(f).map(|t| strip_system(&reader.type_name(&t))).unwrap_or_else(|_| "object".into());
+        let ftype = reader.field_type(f).map(|t| strip_system(&reader.type_name_ctx(&t, &class_generic_names, &[]))).unwrap_or_else(|_| "object".into());
         // Field-level custom attributes.
         let field_attrs = reader.custom_attributes_with_args_for(tbl::FIELD, fi as u32 + 1);
         for (name, args) in &field_attrs {
@@ -262,7 +293,7 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
         } else {
             "public"
         };
-        let type_str = strip_system(&reader.type_name(ptype));
+        let type_str = strip_system(&reader.type_name_ctx(ptype, &class_generic_names, &[]));
         let mut accessors: Vec<&str> = Vec::new();
         if getter.is_some() { accessors.push("get"); }
         if setter.is_some() { accessors.push("set"); }
@@ -302,7 +333,7 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
         }
         let m = &reader.tables.get(tbl::METHODDEF)[mi];
         let explicit = explicit_map.get(&mi).map(|(i, m)| (i.as_str(), m.as_str()));
-        let src = decompile_method(reader, m, (mi + 1) as u32, &name, explicit)?;
+        let src = decompile_method(reader, m, (mi + 1) as u32, &name, explicit, &class_generic_names)?;
         s.push_str(&src);
         s.push('\n');
     }
@@ -339,10 +370,11 @@ fn decompile_nested_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
     // Strip the namespace header (if any) and indent every remaining line.
     let mut lines = src.lines();
     let mut body = String::new();
-    // Skip leading `namespace ...;` line(s) and blank lines.
+    // Skip leading `using` directives, `namespace ...;` line(s) and blank
+    // lines (usings belong only at the top of a file, not inside a parent).
     let mut started = false;
     for line in &mut lines {
-        if !started && (line.starts_with("namespace ") || line.is_empty()) {
+        if !started && (line.starts_with("using ") || line.starts_with("namespace ") || line.is_empty()) {
             continue;
         }
         started = true;
@@ -366,6 +398,21 @@ fn base_type_name(reader: &Reader<'_>, extends: CodedIndex) -> Option<String> {
     Some(strip_system(&n))
 }
 
+/// Namespace of a TypeDefOrRef token (used for base-class rendering).
+fn base_type_namespace(reader: &Reader<'_>, extends: CodedIndex) -> Option<String> {
+    match extends.table {
+        Some(tbl::TYPEDEF) => {
+            let row = reader.tables.get(tbl::TYPEDEF).get(extends.row as usize - 1)?;
+            Some(reader.type_def_namespace(row))
+        }
+        Some(tbl::TYPEREF) => {
+            let row = reader.tables.get(tbl::TYPEREF).get(extends.row as usize - 1)?;
+            Some(reader.type_ref_namespace(row))
+        }
+        _ => None,
+    }
+}
+
 fn strip_system(n: &str) -> String {
     if let Some(rest) = n.strip_prefix("System.") {
         rest.to_string()
@@ -384,7 +431,7 @@ fn simple_name(n: &str) -> String {
     n.rsplit('.').next().unwrap_or(n).to_string()
 }
 
-fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, method_row: u32, type_name: &str, explicit: Option<(&str, &str)>) -> Result<String> {
+fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, method_row: u32, type_name: &str, explicit: Option<(&str, &str)>, class_params: &[String]) -> Result<String> {
     let flags = reader.method_flags(m);
     let name = reader.method_name(m);
     let sig = reader.method_sig(m)?;
@@ -399,18 +446,21 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
     let pinvoke = if is_pinvoke { reader.pinvoke_info(method_row) } else { None };
 
     let generics = reader.generic_params_for(CodedIndex { table: Some(tbl::METHODDEF), row: method_row });
-    let generic_decl = if generics.is_empty() {
+    let method_generic_names: Vec<String> = generics.iter().map(|(_, n)| n.clone()).collect();
+    let generic_decl = if method_generic_names.is_empty() {
         String::new()
     } else {
-        let names: Vec<String> = generics.iter().map(|(_, n)| n.clone()).collect();
-        format!("<{}>", names.join(", "))
+        format!("<{}>", method_generic_names.join(", "))
     };
 
     let mut mods = Vec::new();
     if !is_explicit {
-        let acc = method_access(flags);
-        if !acc.is_empty() {
-            mods.push(acc.to_string());
+        // Static constructors (.cctor) take no access modifier in C#.
+        if !(is_ctor && is_static) {
+            let acc = method_access(flags);
+            if !acc.is_empty() {
+                mods.push(acc.to_string());
+            }
         }
         if is_static {
             mods.push("static".into());
@@ -437,15 +487,21 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
     // and sequence -> is_out (Out flag 0x0008).
     let mut param_defaults: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
     let mut param_is_out: std::collections::HashSet<u16> = std::collections::HashSet::new();
+    let mut param_is_params: std::collections::HashSet<u16> = std::collections::HashSet::new();
     for (idx, r) in param_table[param_rows.clone()].iter().enumerate() {
         let flags = reader.param_flags(r);
         let seq = reader.param_sequence(r);
+        let row_1based = (param_rows.start + idx) as u32 + 1;
         if flags & 0x1000 != 0 {
-            let row_1based = (param_rows.start + idx) as u32 + 1;
             param_defaults.insert(seq, row_1based);
         }
         if flags & 0x0002 != 0 {
             param_is_out.insert(seq);
+        }
+        // params: the [ParamArray] attribute marks the variable-length arg.
+        let attrs = reader.custom_attributes_with_args_for(tbl::PARAM, row_1based);
+        if attrs.iter().any(|(n, _)| n.contains("ParamArray")) {
+            param_is_params.insert(seq);
         }
     }
     let params: Vec<String> = sig
@@ -455,20 +511,24 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
         .map(|(i, t)| {
             let pname = param_names.get(i).cloned().unwrap_or_else(|| format!("arg{i}"));
             let seq = (i + 1) as u16;
+            // params (ParamArray): `params int[] xs` — has no default value.
+            if param_is_params.contains(&seq) {
+                return format!("params {} {}", strip_system(&reader.type_name_ctx(t, class_params, &method_generic_names)), pname);
+            }
             // Check for default value.
             if let Some(&param_row) = param_defaults.get(&seq) {
                 if let Some((tc, blob)) = reader.constant_for_param(param_row) {
                     let def = format_constant(tc, blob);
-                    return format!("{} {} = {}", strip_system(&reader.type_name(t)), pname, def);
+                    return format!("{} {} = {}", strip_system(&reader.type_name_ctx(t, class_params, &method_generic_names)), pname, def);
                 }
             }
             // Check for out parameter (ByRef + Out flag → `out` instead of `ref`).
             if param_is_out.contains(&seq) {
                 if let Type::ByRef(inner) = t {
-                    return format!("out {} {}", strip_system(&reader.type_name(inner)), pname);
+                    return format!("out {} {}", strip_system(&reader.type_name_ctx(inner, class_params, &method_generic_names)), pname);
                 }
             }
-            format!("{} {}", strip_system(&reader.type_name(t)), pname)
+            format!("{} {}", strip_system(&reader.type_name_ctx(t, class_params, &method_generic_names)), pname)
         })
         .collect();
 
@@ -479,7 +539,7 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
     } else {
         clean_display_class_name(&name)
     };
-    let header = if is_ctor {
+    let mut header = if is_ctor {
         format!("    {} {}{}({})",
             mods.join(" "),
             clean_display_class_name(type_name),
@@ -487,7 +547,7 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
             params.join(", "),
         )
     } else {
-        let ret_type = strip_system(&reader.type_name(&sig.ret_type));
+        let ret_type = strip_system(&reader.type_name_ctx(&sig.ret_type, class_params, &method_generic_names));
         format!("    {} {} {}{}({})",
             mods.join(" "),
             ret_type,
@@ -525,7 +585,28 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
 
     let body = body.unwrap();
     let local_types = reader.local_types(body.local_token);
-    let body_src = decompile_body(reader, &body.code, &param_names, &local_types, &sig, is_static, &body.exceptions)?;
+    let local_type_strs: Vec<String> = local_types
+        .iter()
+        .map(|t| strip_system(&reader.type_name_ctx(t, class_params, &[])))
+        .collect();
+    let body_src = decompile_body(reader, &body.code, &param_names, &local_type_strs, &sig, is_static, &body.exceptions)?;
+
+    // Post-process: inline simple closures (display class → lambda).
+    let mut body_lines: Vec<String> = body_src.lines().map(|l| l.to_string()).collect();
+    restructure_lambdas(reader, method_row, &mut body_lines);
+    // Move a leading `base(...);` statement into a `: base(...)` initializer
+    // (C# forbids `base();` as a body statement; it must be an initializer).
+    if is_ctor {
+        if let Some(idx) = body_lines.iter().position(|l| {
+            let t = l.trim();
+            t.starts_with("base(") && t.ends_with(';') && !t.starts_with("//")
+        }) {
+            let base_call = body_lines[idx].trim().trim_end_matches(';').to_string();
+            body_lines[idx] = String::new();
+            header.push_str(&format!(" : {base_call}"));
+        }
+    }
+    let body_src = body_lines.join("\n");
 
     let mut s = String::new();
     s.push_str(&attr_prefix);
@@ -571,7 +652,7 @@ fn decompile_body(
     reader: &Reader<'_>,
     code: &[u8],
     param_names: &[String],
-    local_types: &[Type],
+    local_type_strs: &[String],
     sig: &MethodSig,
     is_static: bool,
     exceptions: &[crate::metadata::reader::ExceptionHandler],
@@ -581,7 +662,7 @@ fn decompile_body(
 
     let mut stack: Vec<String> = Vec::new();
     let mut out: Vec<String> = Vec::new();
-    let local_names = local_type_names(local_types);
+    let local_names: Vec<String> = (0..local_type_strs.len()).map(|i| format!("V_{i}")).collect();
 
     // Map IL offset -> output line index (for inserting try/catch markers).
     let mut offset_to_line: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
@@ -632,17 +713,46 @@ fn decompile_body(
 
     // Post-process: reconstruct collection initializers from dup+Add patterns.
     restructure_collection_initializers(&mut out);
+    restructure_object_initializers(&mut out);
+    restructure_concat_arrays(&mut out);
 
     // Post-process: reconstruct switch statements with inlined case bodies.
     restructure_switch(&mut out);
 
+    // Post-process: drop leading default-value stores redundant with the
+    // `V_N = default;` declarations (keeps the compile→decompile fixed point:
+    // recompiling the explicit store would put it back into the IL).
+    drop_redundant_default_stores(&mut out);
+
     let mut s = String::new();
-    // Local declarations.
-    for (i, lt) in local_types.iter().enumerate() {
+    // Local declarations. Locals that are no longer referenced after the
+    // restructure passes (e.g. the enumerator temp hidden by `foreach`) are
+    // skipped — their compiler-generated types often don't resolve in C#.
+    // Locals declared by a reconstructed `foreach (var V_N in ...)` are also
+    // skipped (C# forbids redeclaring them).
+    let foreach_vars: Vec<String> = out
+        .iter()
+        .filter_map(|l| {
+            let t = l.trim();
+            if let Some(rest) = t.strip_prefix("foreach (var ") {
+                if let Some(name) = rest.split(' ').next() {
+                    return Some(name.to_string());
+                }
+            }
+            None
+        })
+        .collect();
+    for (i, lt) in local_type_strs.iter().enumerate() {
         let lname = local_names.get(i).cloned().unwrap_or_else(|| format!("V_{i}"));
-        s.push_str(&format!("        {} {} = default;\n", strip_system(&reader.type_name(lt)), lname));
+        if !name_referenced(&out, &lname) {
+            continue;
+        }
+        if foreach_vars.contains(&lname) {
+            continue;
+        }
+        s.push_str(&format!("        {lt} {lname} = default;\n"));
     }
-    if !local_types.is_empty() {
+    if !local_type_strs.is_empty() {
         s.push('\n');
     }
     for line in &out {
@@ -653,10 +763,6 @@ fn decompile_body(
         s.push('\n');
     }
     Ok(s)
-}
-
-fn local_type_names(local_types: &[Type]) -> Vec<String> {
-    (0..local_types.len()).map(|i| format!("V_{i}")).collect()
 }
 
 /// Negate a comparison operator for if/else restructuring.
@@ -727,6 +833,33 @@ fn restructure_if_else(out: &mut Vec<String>) {
         let block_end = label_idx - 1;
         let block_last = out[block_end].trim().to_string();
         if !block_last.starts_with("return") && !block_last.starts_with("goto") {
+            i += 1;
+            continue;
+        }
+
+        // The block must not contain any label definition — a label inside
+        // would be re-indented out of reach of other jumps.
+        let block_has_label = out[i+1..label_idx].iter().any(|l| {
+            let t = l.trim();
+            t.starts_with("Label_") && t.ends_with(':')
+        });
+        if block_has_label {
+            i += 1;
+            continue;
+        }
+
+        // The target label must not be referenced by any other line —
+        // short-circuit operators (`||`/`&&`) branch to the same label from
+        // several places, and removing the label would orphan those gotos.
+        let label_name = label.trim();
+        let label_referenced_elsewhere = out.iter().enumerate().any(|(k, l)| {
+            k != i
+                && k != label_idx
+                && l
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|tok| tok == label_name)
+        });
+        if label_referenced_elsewhere {
             i += 1;
             continue;
         }
@@ -1238,10 +1371,14 @@ fn restructure_using(out: &mut Vec<String>) {
         };
 
         // Check the finally block for the Dispose pattern:
-        // `if (!V_X) goto Label_WWWW;` + `V_X.Dispose();`
+        // `if (!V_X) goto Label_WWWW;` / `if (V_X == null) goto ...` +
+        // `V_X.Dispose();`
         let finally_lines: Vec<&String> = out[try_close+2..finally_close].iter().collect();
         let has_null_check = finally_lines.iter().any(|l| {
-            l.trim().starts_with("if (!") && l.trim().contains(&format!("goto ")) && l.contains(resource_var)
+            let t = l.trim();
+            (t.starts_with("if (!") || t.contains(" == null"))
+                && t.contains("goto ")
+                && t.contains(resource_var)
         });
         let has_dispose = finally_lines.iter().any(|l| {
             l.trim().contains(&format!("{resource_var}.Dispose()"))
@@ -1399,6 +1536,8 @@ fn restructure_foreach(out: &mut Vec<String>) {
 
         // Restructure:
         // 1. Replace the GetEnumerator init line with `foreach (var V_Y in <collection>) {`
+        //    (the metadata declaration of V_Y is skipped by the local
+        //    declaration pass, which recognizes foreach-declared variables).
         out[i] = format!("        foreach (var {item_var} in {collection}) {{");
 
         // 2. Remove the `try {` line
@@ -1463,18 +1602,21 @@ fn restructure_foreach(out: &mut Vec<String>) {
 fn restructure_collection_initializers(out: &mut Vec<String>) {
     let mut i = 0;
     while i < out.len() {
-        // Look for `V_tmp_N = new Type();`
+        // Look for `[var ]V_tmp_N = new Type();`
         let line = out[i].clone();
         let trimmed = line.trim();
-        if !trimmed.starts_with("V_tmp_") || !trimmed.contains(" = new ") || !trimmed.ends_with("();") {
+        let indent = &line[..line.len() - trimmed.len()];
+        let var_prefix = if trimmed.starts_with("var ") { "var " } else { "" };
+        let t_body = trimmed.strip_prefix("var ").unwrap_or(trimmed);
+        if !t_body.starts_with("V_tmp_") || !t_body.contains(" = new ") || !t_body.ends_with("();") {
             i += 1;
             continue;
         }
 
         // Extract the temp variable name and the constructor expression.
-        let eq_pos = trimmed.find(" = ").unwrap();
-        let temp_var = &trimmed[..eq_pos];
-        let ctor_expr = &trimmed[eq_pos + 3..].trim_end_matches(';');
+        let eq_pos = t_body.find(" = ").unwrap();
+        let temp_var = &t_body[..eq_pos];
+        let ctor_expr = &t_body[eq_pos + 3..].trim_end_matches(';');
 
         // Collect Add calls: `V_tmp_N.Add(arg);`
         let mut add_args: Vec<String> = Vec::new();
@@ -1506,7 +1648,7 @@ fn restructure_collection_initializers(out: &mut Vec<String>) {
 
         // Replace the init line with the initializer (as a non-statement expression).
         // We'll mark it so the next usage can pick it up.
-        out[i] = format!("        {temp_var} = {initializer};");
+        out[i] = format!("{indent}{var_prefix}{temp_var} = {initializer};");
 
         // Remove the Add lines.
         for k in (i+1)..j {
@@ -1526,6 +1668,448 @@ fn restructure_collection_initializers(out: &mut Vec<String>) {
     // a return or assignment.
     //
     // For now, the temp variable approach is clean enough.
+}
+
+/// Post-process: reconstruct object initializers from `new`/`default` +
+/// member-set patterns.
+/// Class pattern (newobj + dup + stfld):
+///   V_tmp_0 = new Type(args);
+///   V_tmp_0.Member1 = v1;
+///   V_tmp_0.Member2 = v2;
+/// Struct pattern (no newobj — default(T) + stfld):
+///   V_0 = default(Type);
+///   V_0.Member1 = v1;
+///   V_0.Member2 = v2;
+///
+/// Transforms to:
+///   V_tmp_0 = new Type(args) { Member1 = v1, Member2 = v2 };
+///   V_0 = new Type { Member1 = v1, Member2 = v2 };
+fn restructure_object_initializers(out: &mut Vec<String>) {
+    let mut i = 0;
+    while i < out.len() {
+        let line = out[i].clone();
+        let trimmed = line.trim();
+        let indent = &line[..line.len() - trimmed.len()];
+        let var_prefix = if trimmed.starts_with("var ") { "var " } else { "" };
+        let t_body = trimmed.strip_prefix("var ").unwrap_or(trimmed);
+        // Match `[var ]VAR = new Type(...);` (class) or `VAR = default(Type);` (struct).
+        let (temp_var, ctor_expr) = if (t_body.starts_with("V_") || t_body.starts_with("V_tmp_"))
+            && t_body.contains(" = new ")
+            && t_body.ends_with(");")
+        {
+            let eq = t_body.find(" = ").unwrap();
+            (t_body[..eq].to_string(), t_body[eq + 3..].trim_end_matches(';').to_string())
+        } else if t_body.starts_with("V_") && t_body.contains(" = default(") && t_body.ends_with(");") {
+            let eq = t_body.find(" = ").unwrap();
+            let inner = t_body[eq + 3 + "default(".len()..].trim_end_matches(");");
+            (t_body[..eq].to_string(), format!("new {inner}"))
+        } else {
+            i += 1;
+            continue;
+        };
+
+        // Collect consecutive `VAR.Member = value;` lines.
+        let mut members: Vec<(String, String)> = Vec::new();
+        let mut j = i + 1;
+        while j < out.len() {
+            let t = out[j].trim();
+            let prefix = format!("{temp_var}.");
+            if t.starts_with(&prefix) && t.ends_with(';') {
+                let rest = &t[prefix.len()..];
+                if let Some(eq_pos) = rest.find(" = ") {
+                    let member = &rest[..eq_pos];
+                    // Only direct members — `a.b.c = v` cannot be an
+                    // initializer member.
+                    if member.contains('.') {
+                        break;
+                    }
+                    let value = rest[eq_pos + 3..].trim_end_matches(';');
+                    members.push((member.to_string(), value.to_string()));
+                    j += 1;
+                } else {
+                    break;
+                }
+            } else if t.is_empty() {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+
+        if members.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        let init = members
+            .iter()
+            .map(|(m, v)| format!("{m} = {v}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Drop the empty ctor parens when an initializer follows:
+        // `new T() { ... }` → `new T { ... }`.
+        let base = ctor_expr.strip_suffix("()").unwrap_or(&ctor_expr);
+        out[i] = format!("{indent}{var_prefix}{temp_var} = {base} {{ {init} }};");
+        for k in (i + 1)..j {
+            out[k] = String::new();
+        }
+        i = j;
+    }
+}
+
+
+/// Post-process: fold a compiler-generated string array + `String.Concat(arr)`
+/// back into a direct `+` concatenation. Roslyn lowers long string
+/// concatenations (`a + b + c + d + e`) to:
+///   var V_tmp_0 = new string[5];
+///   V_tmp_0[0] = "== ";
+///   ...
+///   return String.Concat(V_tmp_0);
+///
+/// Transforms to:
+///   return "==" + name + ":" + n.ToString() + " ==";
+///
+/// Any deviation from the pattern (missing/unordered elements, other uses of
+/// the temp) leaves the output unchanged (safe).
+fn restructure_concat_arrays(out: &mut Vec<String>) {
+    let mut i = 0;
+    while i < out.len() {
+        let line = out[i].clone();
+        let trimmed = line.trim();
+        // Find a `String.Concat(V_tmp_N)` / `string.Concat(V_tmp_N)` usage.
+        let concat_pos = match trimmed.find("Concat(") {
+            Some(p) => p,
+            None => {
+                i += 1;
+                continue;
+            }
+        };
+        let open = concat_pos + "Concat(".len();
+        let close = match trimmed[open..].find(')') {
+            Some(p) => open + p,
+            None => {
+                i += 1;
+                continue;
+            }
+        };
+        let arg = trimmed[open..close].trim();
+        if !arg.starts_with("V_tmp_") || arg.contains('.') || arg.contains('[') {
+            i += 1;
+            continue;
+        }
+        let temp = arg.to_string();
+
+        // Walk upward to the declaration `var TEMP = new string[N];` with a
+        // contiguous run of `TEMP[i] = expr;` element stores in between.
+        let mut decl_idx = None;
+        let mut elem_lines: Vec<(usize, String)> = Vec::new();
+        let mut k = i;
+        while k > 0 {
+            k -= 1;
+            let t = out[k].trim();
+            let elem_prefix = format!("{temp}[");
+            if t.starts_with(&elem_prefix) && t.ends_with(';') {
+                elem_lines.push((k, t.to_string()));
+                continue;
+            }
+            let decl_prefix = format!("var {temp} = new string[");
+            let bare_prefix = format!("{temp} = new string[");
+            if t.starts_with(&decl_prefix) || t.starts_with(&bare_prefix) {
+                decl_idx = Some(k);
+            }
+            break;
+        }
+        let decl_idx = match decl_idx {
+            Some(d) => d,
+            None => {
+                i += 1;
+                continue;
+            }
+        };
+        let size: usize = match out[decl_idx]
+            .trim()
+            .rsplit('[')
+            .next()
+            .and_then(|s| s.strip_suffix("];"))
+            .and_then(|s| s.trim().parse().ok())
+        {
+            Some(n) => n,
+            None => {
+                i += 1;
+                continue;
+            }
+        };
+        if elem_lines.len() != size {
+            i += 1;
+            continue;
+        }
+        // Parse elements and check indices 0..N-1 are each stored exactly once.
+        let mut elems: Vec<Option<String>> = vec![None; size];
+        let mut ok = true;
+        for (_, t) in &elem_lines {
+            let rest = &t[temp.len() + 1..]; // after `TEMP[`
+            let close_br = match rest.find(']') {
+                Some(p) => p,
+                None => {
+                    ok = false;
+                    break;
+                }
+            };
+            let idx: usize = match rest[..close_br].parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            };
+            let val = match rest[close_br + 1..].strip_prefix(" = ") {
+                Some(v) => v.trim_end_matches(';'),
+                None => {
+                    ok = false;
+                    break;
+                }
+            };
+            if idx >= size || elems[idx].is_some() {
+                ok = false;
+                break;
+            }
+            // Parenthesize values whose top-level shape could bind looser
+            // than `+` (ternaries, comparisons, bitwise ops); string
+            // literals never need it.
+            let is_literal = (val.starts_with('"') && val.ends_with('"'))
+                || val == "null"
+                || val.parse::<f64>().is_ok();
+            let needs_parens = !is_literal && val.contains(['?', '&', '|', '^', '<', '>', '=']);
+            elems[idx] = Some(if needs_parens {
+                format!("({val})")
+            } else {
+                val.to_string()
+            });
+        }
+        if !ok || elems.iter().any(|e| e.is_none()) {
+            i += 1;
+            continue;
+        }
+
+        // The temp must not be used anywhere else.
+        let used_elsewhere = out.iter().enumerate().any(|(k2, l)| {
+            k2 != decl_idx
+                && !elem_lines.iter().any(|(k3, _)| *k3 == k2)
+                && k2 != i
+                && l.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|tok| tok == temp)
+        });
+        if used_elsewhere {
+            i += 1;
+            continue;
+        }
+
+        // Rewrite the usage line and remove the temp's lines.
+        let indent = &line[..line.len() - trimmed.len()];
+        // Cut the usage at the start of the `Owner.` prefix of
+        // `Owner.Concat(...)` — `return String.Concat(V_tmp_0);` →
+        // `return "a" + b;`
+        let owner_start = trimmed[..concat_pos]
+            .rfind('.')
+            .map(|dot| {
+                let before = &trimmed[..dot];
+                before
+                    .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .map(|q| q + 1)
+                    .unwrap_or(0)
+            })
+            .unwrap_or(concat_pos);
+        let joined = elems
+            .into_iter()
+            .map(|e| e.unwrap())
+            .collect::<Vec<_>>()
+            .join(" + ");
+        out[i] = format!(
+            "{indent}{}{}{}",
+            &trimmed[..owner_start],
+            joined,
+            &trimmed[close + 1..]
+        );
+        out[decl_idx] = String::new();
+        for (k4, _) in elem_lines {
+            out[k4] = String::new();
+        }
+        i += 1;
+    }
+}
+
+/// Post-process: inline simple closures (display class → lambda expression).
+/// Pattern (as produced by the object-initializer pass):
+///   V_tmp_0 = new DisplayClass { offset = offset };
+///   return new Func<int, int>(V_tmp_0, DisplayClass.lambda_0).Invoke(10);
+///
+/// Transforms to:
+///   return ((int x) => x + offset)(10);
+///
+/// The lambda body is decompiled from the display class's lambda_N method;
+/// captured fields (`this.f`) are replaced by their initializer values.
+/// Any deviation from the pattern leaves the output unchanged (safe).
+fn restructure_lambdas(reader: &Reader<'_>, method_row: u32, out: &mut Vec<String>) {
+    // Collect display-class object initializers: temp -> (field -> value).
+    let mut captures: std::collections::HashMap<String, std::collections::HashMap<String, String>> =
+        std::collections::HashMap::new();
+    for line in out.iter() {
+        let t = line.trim();
+        let t = t.strip_prefix("var ").unwrap_or(t);
+        if t.starts_with("V_") && t.contains(" = new DisplayClass { ") && t.ends_with(" };") {
+            let eq = t.find(" = ").unwrap();
+            let temp = t[..eq].to_string();
+            // Skip `new DisplayClass ` and the leading `{ `.
+            let members = t[eq + 3 + "new DisplayClass ".len() + 2..].trim_end_matches(" };");
+            let mut map = std::collections::HashMap::new();
+            for part in members.split(", ") {
+                if let Some(fe) = part.find(" = ") {
+                    map.insert(part[..fe].to_string(), part[fe + 3..].to_string());
+                }
+            }
+            captures.insert(temp, map);
+        }
+    }
+    if captures.is_empty() {
+        return;
+    }
+    let owner = owner_type_row(reader, method_row);
+
+    let mut i = 0;
+    while i < out.len() {
+        let line = out[i].clone();
+        let trimmed = line.trim();
+        let indent = &line[..line.len() - trimmed.len()];
+        // Match `... new Func<...>(CTX, DisplayClass.lambda_N).Invoke(ARGS);`
+        let Some(func_pos) = trimmed.find("new Func<") else { i += 1; continue };
+        let Some(open_rel) = trimmed[func_pos..].find('(') else { i += 1; continue };
+        let open = func_pos + open_rel;
+        let Some(close) = matching_paren(trimmed, open) else { i += 1; continue };
+        let ctor_args = &trimmed[open + 1..close];
+        let mut parts = ctor_args.split(',');
+        let (Some(ctx_raw), Some(lambda_raw)) = (parts.next(), parts.next()) else { i += 1; continue };
+        if parts.next().is_some() {
+            i += 1;
+            continue;
+        }
+        let ctx = ctx_raw.trim();
+        let lambda_ref = lambda_raw.trim();
+        let Some(cap) = captures.get(ctx) else { i += 1; continue };
+        let Some(lambda_name) = lambda_ref.strip_prefix("DisplayClass.") else { i += 1; continue };
+
+        let after = &trimmed[close + 1..];
+        let Some(inv_rel) = after.find(".Invoke(") else { i += 1; continue };
+        // Position of the `(` that opens the Invoke argument list.
+        let inv_open = close + 1 + inv_rel + ".Invoke(".len() - 1;
+        let Some(inv_close) = matching_paren(trimmed, inv_open) else { i += 1; continue };
+        let invoke_args = &trimmed[inv_open + 1..inv_close];
+
+        // Decompile the lambda method and derive `(params) => expr`.
+        let Some((sig, param_names, body_src)) = lambda_body(reader, owner, lambda_name) else { i += 1; continue };
+        let stmts: Vec<&str> = body_src.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+        if stmts.len() != 1 {
+            i += 1;
+            continue;
+        }
+        let Some(expr) = stmts[0].strip_prefix("return ").and_then(|e| e.strip_suffix(';')) else { i += 1; continue };
+        let mut expr = expr.to_string();
+        for (field, value) in cap {
+            expr = expr.replace(&format!("this.{field}"), value);
+        }
+        // Params: `T name` from the lambda's signature.
+        let params: Vec<String> = sig
+            .param_types
+            .iter()
+            .zip(&param_names)
+            .map(|(t, n)| format!("{} {n}", strip_system(&reader.type_name(t))))
+            .collect();
+        let lambda = format!("({}) => {}", params.join(", "), expr);
+
+        let prefix = &trimmed[..func_pos];
+        let suffix = &trimmed[inv_close + 1..];
+        out[i] = format!("{indent}{prefix}({lambda})({invoke_args}){suffix}");
+
+        // If the display-class temp is no longer referenced anywhere, drop
+        // its now-dead initializer line.
+        if let Some(init_idx) = out.iter().position(|l| l.contains(ctx) && l.contains(" = new DisplayClass { ")) {
+            let used_elsewhere = out
+                .iter()
+                .enumerate()
+                .any(|(k, l)| k != init_idx && l.contains(ctx));
+            if !used_elsewhere {
+                out[init_idx] = String::new();
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Index of the matching close paren for the paren at `open` (depth-aware).
+fn matching_paren(s: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (k, ch) in s[open..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + k);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 1-based TypeDef row owning the given 1-based MethodDef row.
+fn owner_type_row(reader: &Reader<'_>, method_row: u32) -> Option<u32> {
+    let type_defs = reader.tables.get(tbl::TYPEDEF);
+    for (i, td) in type_defs.iter().enumerate() {
+        let start = td.col(5);
+        let next = type_defs
+            .get(i + 1)
+            .map(|r| r.col(5))
+            .unwrap_or_else(|| reader.tables.row_count(tbl::METHODDEF) + 1);
+        if method_row >= start && method_row < next {
+            return Some((i + 1) as u32);
+        }
+    }
+    None
+}
+
+/// Decompile the `lambda_N` method of the nested DisplayClass of `owner`.
+/// Returns (signature, param names, decompiled body).
+fn lambda_body(
+    reader: &Reader<'_>,
+    owner: Option<u32>,
+    lambda_name: &str,
+) -> Option<(MethodSig, Vec<String>, String)> {
+    for child in nested_types_for(reader, owner?) {
+        let row = &reader.tables.get(tbl::TYPEDEF)[child as usize - 1];
+        if clean_display_class_name(&reader.type_def_name(row)) != "DisplayClass" {
+            continue;
+        }
+        for mi in reader.type_method_rows(child) {
+            let m = &reader.tables.get(tbl::METHODDEF)[mi];
+            if clean_display_class_name(&reader.method_name(m)) != lambda_name {
+                continue;
+            }
+            let method_row = (mi + 1) as u32;
+            let sig = reader.method_sig(m).ok()?;
+            let param_names = method_param_names(reader, method_row, &sig, false);
+            let rva = reader.method_rva(m);
+            let body = reader.method_body(rva).ok()??;
+            let local_strs: Vec<String> = reader
+                .local_types(body.local_token)
+                .iter()
+                .map(|t| strip_system(&reader.type_name(t)))
+                .collect();
+            let src = decompile_body(reader, &body.code, &param_names, &local_strs, &sig, false, &body.exceptions).ok()?;
+            return Some((sig, param_names, src));
+        }
+    }
+    None
 }
 
 /// Post-process: reconstruct switch statements by inlining case bodies.
@@ -1607,6 +2191,36 @@ fn detect_switch_expr_pattern(
         common_label
     } else {
         None
+    }
+}
+
+/// Post-process: drop entry-block stores of default values that are already
+/// guaranteed by the `V_N = default;` local declarations. Recompiling
+/// `int V_0 = default; V_0 = 0;` puts an extra explicit store into the IL
+/// (csc only eliminates the default store when no branch intervenes), so
+/// keeping the explicit store breaks the compile→decompile fixed point.
+/// Only leading straight-line stores are considered; control flow stops pass.
+fn drop_redundant_default_stores(out: &mut Vec<String>) {
+    const DEFAULTS: [&str; 9] = ["0", "false", "null", "0.0", "0f", "0.0f", "0L", "0UL", "0u"];
+    for line in out.iter_mut() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        // Match `V_N = <default-literal>;`
+        let body = t.strip_suffix(';');
+        let is_redundant = body
+            .is_some_and(|b| {
+                b.starts_with("V_")
+                    && !b.contains('(')
+                    && b.split_once(" = ")
+                        .is_some_and(|(_, v)| DEFAULTS.contains(&v.trim()))
+            });
+        if is_redundant {
+            *line = String::new();
+            continue;
+        }
+        break;
     }
 }
 
@@ -2005,6 +2619,8 @@ fn handle_instr(
                 stmt(out, "return;".into());
             } else if !stack.is_empty() {
                 let v = pop(stack);
+                // A bool method returning an IL 1/0 needs true/false in C#.
+                let v = if matches!(sig.ret_type, Type::Bool) { bool_literal(&v) } else { v };
                 stmt(out, format!("return {v};"));
             } else {
                 stmt(out, "return;".into());
@@ -2013,11 +2629,12 @@ fn handle_instr(
         "ldnull" => push(stack, "null".into()),
         "dup" => {
             if let Some(top) = stack.last().cloned() {
-                // If the top is a `new ...()` expression, introduce a temp
-                // variable to avoid rendering the constructor multiple times.
-                if top.starts_with("new ") && top.ends_with(")") {
+                // If the top is a `new` expression (object or array),
+                // introduce a temp variable to avoid rendering the
+                // constructor/allocator multiple times.
+                if top.starts_with("new ") {
                     let temp = format!("V_tmp_{}", out.len());
-                    stmt(out, format!("{temp} = {top};"));
+                    stmt(out, format!("var {temp} = {top};"));
                     // Replace the stack top with the temp variable.
                     if let Some(t) = stack.last_mut() {
                         *t = temp.clone();
@@ -2070,7 +2687,10 @@ fn handle_instr(
         }
         "ldarga.s" | "ldarga" => {
             let idx = var_index(&ins.operand);
-            push(stack, format!("ref {}", arg_name(param_names, is_static, idx)));
+            // Address-of an argument — for method calls on value types C#
+            // just uses the variable name (the address is implicit), same
+            // convention as ldloca.
+            push(stack, arg_name(param_names, is_static, idx));
         }
         "starg.s" | "starg" => {
             let idx = var_index(&ins.operand);
@@ -2164,6 +2784,18 @@ fn handle_instr(
                     args.push(pop(stack));
                 }
                 args.reverse();
+                // Add out/ref keywords for by-ref parameters.
+                let rendered_args: Vec<String> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        if matches!(csig.param_types.get(i), Some(Type::ByRef(_))) {
+                            format!("{} {a}", byref_keyword(reader, *tok, i, a))
+                        } else {
+                            a.clone()
+                        }
+                    })
+                    .collect();
                 let expr = if csig.has_this {
                     let obj = pop(stack);
                     if mname == ".ctor" {
@@ -2174,14 +2806,29 @@ fn handle_instr(
                             stmt(out, "base();".into());
                         }
                         String::new()
+                    } else if let Some(prop) = property_name_for_accessor(reader, *tok) {
+                        // get_X/set_X accessors cannot be called explicitly in
+                        // C# (CS0571) — render property syntax instead.
+                        if mname.starts_with("set_") {
+                            let val = rendered_args.first().cloned().unwrap_or_default();
+                            format!("{obj}.{prop} = {val}")
+                        } else {
+                            format!("{obj}.{prop}")
+                        }
                     } else {
-                        format!("{obj}.{mname}({})", args.join(", "))
+                        format!("{obj}.{mname}({})", rendered_args.join(", "))
                     }
-                } else if (owner == "String" || owner == "string") && mname == "Concat" {
-                    // String.Concat(a, b, c, ...) → a + b + c
-                    args.join(" + ")
+                } else if (owner == "String" || owner == "string")
+                    && mname == "Concat"
+                    && !csig.param_types.is_empty()
+                    && csig.param_types.iter().all(|t| matches!(t, Type::String))
+                {
+                    // String.Concat(a, b, c, ...) → a + b + c (only the
+                    // all-string overloads; the array/object overloads must
+                    // keep the method-call form).
+                    rendered_args.join(" + ")
                 } else {
-                    format!("{owner}.{mname}({})", args.join(", "))
+                    format!("{owner}.{mname}({})", rendered_args.join(", "))
                 };
                 if expr.is_empty() {
                     // base ctor already emitted as statement.
@@ -2223,6 +2870,7 @@ fn handle_instr(
                 let (_, fname) = field_ref(reader, *tok);
                 let val = pop(stack);
                 let obj = pop(stack);
+                let val = if field_token_is_bool(reader, *tok) { bool_literal(&val) } else { val };
                 stmt(out, format!("{obj}.{} = {val};", clean_field_name(&fname)));
             }
         }
@@ -2239,7 +2887,7 @@ fn handle_instr(
         | "ldind.i1" | "ldind.u1" | "ldind.i2" | "ldind.u2"
         | "ldind.u4" => {
             let addr = pop(stack);
-            push(stack, format!("*{addr}"));
+            push(stack, deref_or_plain(param_names, sig, &addr));
         }
         // Indirect store: pop a value and a managed pointer, store through.
         "stind.i4" | "stind.i8" | "stind.r4" | "stind.r8"
@@ -2247,7 +2895,7 @@ fn handle_instr(
         | "stind.i1" | "stind.i2" => {
             let val = pop(stack);
             let addr = pop(stack);
-            stmt(out, format!("*{addr} = {val};"));
+            stmt(out, format!("{} = {val};", deref_or_plain(param_names, sig, &addr)));
         }
 
         // Object model
@@ -2255,8 +2903,17 @@ fn handle_instr(
             if let Operand::Token(tok) = &ins.operand {
                 let t = type_token_name(reader, *tok);
                 let v = pop(stack);
-                push(stack, format!("(object)({v})"));
-                let _ = t;
+                // A boxed enum keeps its identity (HasFlag compares box
+                // types), so render an enum cast when the token is a
+                // same-assembly enum; everything else is just `object`.
+                // The extra parens keep cast-vs-member-access precedence
+                // sane: `((Planet)(p)).ToString()` not `(Planet)(p).ToString()`
+                // (which parses as `(Planet)(p.ToString())`).
+                if type_token_is_enum(reader, *tok) {
+                    push(stack, format!("(({})({}))", t, v));
+                } else {
+                    push(stack, format!("(object)({v})"));
+                }
             }
         }
         "unbox.any" => {
@@ -2279,7 +2936,13 @@ fn handle_instr(
                 let t = type_token_name(reader, *tok);
                 let v = pop(stack);
                 let v_s = strip_outer_parens(&v);
-                push(stack, format!("{v_s} as {t}"));
+                // `as` is only valid for reference types; value-type pattern
+                // checks must render as `is` (`obj is int`, not `obj as int`).
+                if type_token_is_value(reader, *tok) {
+                    push(stack, format!("{v_s} is {t}"));
+                } else {
+                    push(stack, format!("{v_s} as {t}"));
+                }
             }
         }
         "newarr" => {
@@ -2324,12 +2987,20 @@ fn handle_instr(
         "brfalse" | "brfalse.s" => {
             let tgt = branch_target_of(ins);
             let v = pop(stack);
-            stmt(out, format!("if (!{v}) goto Label_{tgt:04X};"));
+            if looks_bool(&v) {
+                stmt(out, format!("if (!{v}) goto Label_{tgt:04X};"));
+            } else {
+                stmt(out, format!("if ({v} == null) goto Label_{tgt:04X};"));
+            }
         }
         "brtrue" | "brtrue.s" => {
             let tgt = branch_target_of(ins);
             let v = pop(stack);
-            stmt(out, format!("if ({v}) goto Label_{tgt:04X};"));
+            if looks_bool(&v) {
+                stmt(out, format!("if ({v}) goto Label_{tgt:04X};"));
+            } else {
+                stmt(out, format!("if ({v} != null) goto Label_{tgt:04X};"));
+            }
         }
         "beq" | "beq.s" => cmp_branch(out, stack, ins, "=="),
         "bge" | "bge.s" => cmp_branch(out, stack, ins, ">="),
@@ -2535,21 +3206,33 @@ fn conv(stack: &mut Vec<String>, ty: &str) {
     stack.push(format!("({ty})({a_stripped})"));
 }
 
+/// Wrap an operand in parens if its top-level operator binds looser than the
+/// comparison operator it is fed to (`a & 1 != 0` parses wrong without them).
+fn paren_if_needed(e: &str, op: &str) -> String {
+    let s = strip_outer_parens(e);
+    if top_op(s).map(|o| prec(o) < prec(op)).unwrap_or(false) {
+        format!("({s})")
+    } else {
+        s.to_string()
+    }
+}
+
 fn cmp_op(stack: &mut Vec<String>, op: &str) {
     let b = stack.pop().unwrap_or_else(|| "/*?*/".into());
     let a = stack.pop().unwrap_or_else(|| "/*?*/".into());
-    let a_s = strip_outer_parens(&a);
-    let b_s = strip_outer_parens(&b);
-    stack.push(format!("({a_s} {op} {b_s} ? 1 : 0)"));
+    // A comparison produces a bool in C# — no `? 1 : 0` wrapper.
+    stack.push(format!("({} {op} {})", paren_if_needed(&a, op), paren_if_needed(&b, op)));
 }
 
 fn cmp_branch(out: &mut Vec<String>, stack: &mut Vec<String>, ins: &Instruction, op: &str) {
     let tgt = branch_target_of(ins);
     let b = stack.pop().unwrap_or_else(|| "/*?*/".into());
     let a = stack.pop().unwrap_or_else(|| "/*?*/".into());
-    let a_s = strip_outer_parens(&a);
-    let b_s = strip_outer_parens(&b);
-    out.push(format!("        if ({a_s} {op} {b_s}) goto Label_{tgt:04X};"));
+    out.push(format!(
+        "        if ({} {op} {}) goto Label_{tgt:04X};",
+        paren_if_needed(&a, op),
+        paren_if_needed(&b, op)
+    ));
 }
 
 fn branch_target_of(ins: &Instruction) -> usize {
@@ -2677,6 +3360,191 @@ fn type_token_name(reader: &Reader<'_>, tok: u32) -> String {
     strip_system(&reader.type_def_or_ref_name(ci))
 }
 
+/// If the token is a property getter/setter accessor (same-assembly,
+/// MethodDef or MemberRef on a TypeDef/TypeSpec parent), return the property
+/// name. C# forbids calling accessors explicitly (CS0571), so call sites
+/// must render property syntax. External (TypeRef) parents are left as
+/// method calls — a method could legitimately be named `set_Foo`.
+fn property_name_for_accessor(reader: &Reader<'_>, tok: u32) -> Option<String> {
+    let table = (tok >> 24) as u8;
+    let row = (tok & 0x00FF_FFFF) as usize;
+    match table {
+        tbl::METHODDEF => {
+            // 0-based MethodDef index of the accessor.
+            let method_0based = row - 1;
+            let owner = owner_type_row(reader, row as u32)?;
+            for (name, _, getter, setter) in reader.properties_for_type(owner) {
+                if getter == Some(method_0based) || setter == Some(method_0based) {
+                    return Some(name);
+                }
+            }
+            None
+        }
+        tbl::MEMBERREF => {
+            let mr = reader.tables.get(tbl::MEMBERREF).get(row - 1)?;
+            let parent = reader.member_ref_parent(mr);
+            // Resolve the parent to a TypeDef row (generic instantiations are
+            // TypeSpecs whose base is the TypeDef).
+            let owner = match parent.table {
+                Some(tbl::TYPEDEF) => parent.row,
+                Some(tbl::TYPESPEC) => {
+                    let r = reader.tables.get(tbl::TYPESPEC).get(parent.row as usize - 1)?;
+                    let blob = reader.blob(r.col(0));
+                    let (t, _) = crate::metadata::signatures::parse_type_with_len(blob).ok()?;
+                    match t {
+                        Type::Class(ci) | Type::ValueType(ci) => ci.row,
+                        Type::GenericInst(base, _) => match base.as_ref() {
+                            Type::Class(ci) | Type::ValueType(ci) => ci.row,
+                            _ => return None,
+                        },
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            };
+            // Match by accessor name: `set_Name` → property `Name`.
+            let mname = reader.member_ref_name(mr);
+            let target = mname
+                .strip_prefix("set_")
+                .or_else(|| mname.strip_prefix("get_"))?;
+            reader
+                .properties_for_type(owner)
+                .iter()
+                .any(|(name, _, _, _)| name == target)
+                .then(|| target.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Is the type token a same-assembly enum (TypeDef whose base is
+/// System.Enum)? External enums (TypeRef) have no Extends column and fall
+/// back to `(object)` boxing.
+fn type_token_is_enum(reader: &Reader<'_>, tok: u32) -> bool {
+    let table = (tok >> 24) as u8;
+    let row = (tok & 0x00FF_FFFF) as usize;
+    if table == tbl::TYPEDEF {
+        if let Some(r) = reader.tables.get(tbl::TYPEDEF).get(row - 1) {
+            return strip_system(&reader.type_def_or_ref_name(reader.type_def_extends(r))) == "Enum";
+        }
+    }
+    false
+}
+
+fn type_token_is_value(reader: &Reader<'_>, tok: u32) -> bool {    let table = (tok >> 24) as u8;
+    let row = (tok & 0x00FF_FFFF) as usize;
+    match table {
+        tbl::TYPEDEF => {
+            if let Some(r) = reader.tables.get(tbl::TYPEDEF).get(row - 1) {
+                reader.type_def_or_ref_name(reader.type_def_extends(r)) == "ValueType"
+            } else {
+                false
+            }
+        }
+        tbl::TYPEREF => {
+            if let Some(r) = reader.tables.get(tbl::TYPEREF).get(row - 1) {
+                matches!(
+                    reader.type_ref_name(r).as_str(),
+                    "Boolean" | "Char" | "SByte" | "Byte" | "Int16" | "UInt16" | "Int32"
+                        | "UInt32" | "Int64" | "UInt64" | "Single" | "Double"
+                        | "IntPtr" | "UIntPtr" | "Decimal"
+                )
+            } else {
+                false
+            }
+        }
+        tbl::TYPESPEC => {
+            if let Some(r) = reader.tables.get(tbl::TYPESPEC).get(row - 1) {
+                if let Ok(t) = crate::metadata::signatures::parse_type(reader.blob(r.col(0))) {
+                    matches!(t, Type::ValueType(_))
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Is the field token a System.Boolean field? (Lets stfld render true/false.)
+fn field_token_is_bool(reader: &Reader<'_>, tok: u32) -> bool {
+    let table = (tok >> 24) as u8;
+    let row = (tok & 0x00FF_FFFF) as usize;
+    if table == tbl::FIELD {
+        if let Some(r) = reader.tables.get(tbl::FIELD).get(row - 1) {
+            if let Ok(t) = reader.field_type(r) {
+                return matches!(t, Type::Bool);
+            }
+        }
+    }
+    false
+}
+
+/// Map a numeric constant to a C# bool literal for boolean fields.
+fn bool_literal(v: &str) -> String {
+    match v.trim() {
+        "0" => "false".into(),
+        "1" => "true".into(),
+        other => other.to_string(),
+    }
+}
+
+/// `ldind`/`stind` on a `ref`/`out` parameter is the parameter itself in C#;
+/// `*` dereferencing is only for real pointers.
+fn deref_or_plain(param_names: &[String], sig: &MethodSig, addr: &str) -> String {
+    let is_byref_param = param_names.iter().enumerate().any(|(i, pn)| {
+        pn == addr && matches!(sig.param_types.get(i), Some(Type::ByRef(_)))
+    });
+    if is_byref_param {
+        addr.to_string()
+    } else {
+        format!("*{addr}")
+    }
+}
+
+/// Decide the `out`/`ref` keyword for a by-ref call argument. Internal
+/// callees expose their Param-table Out flag; external callees don't, so
+/// bare-variable arguments follow the common `out` convention (TryParse,
+/// TryGetValue) and other lvalues (fields, array elements) are passed by
+/// `ref`.
+fn byref_keyword(reader: &Reader<'_>, tok: u32, i: usize, arg: &str) -> &'static str {
+    let table = (tok >> 24) as u8;
+    if table == tbl::METHODDEF {
+        let method_row = (tok & 0x00FF_FFFF) as u32;
+        let seq = (i + 1) as u16;
+        let rows = reader.method_param_rows(method_row);
+        for r in reader.tables.get(tbl::PARAM)[rows].iter() {
+            if reader.param_sequence(r) == seq {
+                return if reader.param_flags(r) & 0x0002 != 0 { "out" } else { "ref" };
+            }
+        }
+        "ref"
+    } else {
+        let bare = arg
+            .split(|c: char| c.is_whitespace() || ".[]()\"'".contains(c))
+            .count()
+            == 1;
+        if bare { "out" } else { "ref" }
+    }
+}
+
+/// Heuristic: does the branch value already look like a boolean expression?
+/// If not (e.g. a bare reference variable), C# needs `!= null`.
+fn looks_bool(expr: &str) -> bool {
+    ["==", "!=", "<=", ">=", "<", ">", " is ", "&&", "||"]
+        .iter()
+        .any(|op| expr.contains(op))
+}
+
+/// Is `name` used as a whole identifier anywhere in the lines?
+fn name_referenced(lines: &[String], name: &str) -> bool {
+    lines
+        .iter()
+        .any(|l| l.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|tok| tok == name))
+}
+
 fn quote_string(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars() {
@@ -2739,20 +3607,118 @@ fn field_access(flags: u16) -> &'static str {
 
 /// Format a Constant table value blob (ECMA-335 II.23.1.16) as a C# literal.
 /// `type_code` is the element type; `blob` is the raw little-endian bytes.
+/// Format a Constant-table value blob (ECMA-335 II.22.9) as a C# literal.
+/// The type code uses the II.23.1.16 element-type encoding: BOOLEAN=0x02,
+/// CHAR=0x03, I1=0x04 ... I4=0x08, I8=0x0A, R4=0x0C, R8=0x0D, STRING=0x0E,
+/// CLASS=0x12 (null reference).
 fn format_constant(type_code: u8, blob: &[u8]) -> String {
     match type_code {
-        0x06 => i8::from_le_bytes([blob.get(0).copied().unwrap_or(0)]).to_string(),       // int8
-        0x07 => u8::from_le_bytes([blob.get(0).copied().unwrap_or(0)]).to_string(),       // uint8
-        0x08 => i16::from_le_bytes(blob[..2.min(blob.len())].try_into().unwrap_or([0, 0])).to_string(),  // int16
-        0x09 => u16::from_le_bytes(blob[..2.min(blob.len())].try_into().unwrap_or([0, 0])).to_string(),  // uint16
-        0x0a => i32::from_le_bytes(blob[..4.min(blob.len())].try_into().unwrap_or([0, 0, 0, 0])).to_string(),  // int32
-        0x0b => u32::from_le_bytes(blob[..4.min(blob.len())].try_into().unwrap_or([0, 0, 0, 0])).to_string(),  // uint32
-        0x0c => format!("{}L", i64::from_le_bytes(blob[..8.min(blob.len())].try_into().unwrap_or([0; 8])),),  // int64
-        0x0d => format!("{}UL", u64::from_le_bytes(blob[..8.min(blob.len())].try_into().unwrap_or([0; 8])),), // uint64
-        0x0e => format!("{}f", f32::from_le_bytes(blob[..4.min(blob.len())].try_into().unwrap_or([0, 0, 0, 0])),), // float32
-        0x0f => f64::from_le_bytes(blob[..8.min(blob.len())].try_into().unwrap_or([0; 8])).to_string(), // float64
+        0x02 => {
+            if blob.first().copied().unwrap_or(0) != 0 { "true".into() } else { "false".into() }
+        }
+        0x03 => {
+            let u = u16::from_le_bytes(blob[..2.min(blob.len())].try_into().unwrap_or([0, 0]));
+            match char::from_u32(u as u32) {
+                Some(c) => format!("'{c}'"),
+                None => "0".into(),
+            }
+        }
+        0x04 => i8::from_le_bytes([blob.get(0).copied().unwrap_or(0)]).to_string(),       // int8
+        0x05 => u8::from_le_bytes([blob.get(0).copied().unwrap_or(0)]).to_string(),       // uint8
+        0x06 => i16::from_le_bytes(blob[..2.min(blob.len())].try_into().unwrap_or([0, 0])).to_string(),  // int16
+        0x07 => u16::from_le_bytes(blob[..2.min(blob.len())].try_into().unwrap_or([0, 0])).to_string(),  // uint16
+        0x08 => i32::from_le_bytes(blob[..4.min(blob.len())].try_into().unwrap_or([0, 0, 0, 0])).to_string(),  // int32
+        0x09 => u32::from_le_bytes(blob[..4.min(blob.len())].try_into().unwrap_or([0, 0, 0, 0])).to_string(),  // uint32
+        0x0a => format!("{}L", i64::from_le_bytes(blob[..8.min(blob.len())].try_into().unwrap_or([0; 8])),),  // int64
+        0x0b => format!("{}UL", u64::from_le_bytes(blob[..8.min(blob.len())].try_into().unwrap_or([0; 8])),), // uint64
+        0x0c => format!("{}f", f32::from_le_bytes(blob[..4.min(blob.len())].try_into().unwrap_or([0, 0, 0, 0])),), // float32
+        0x0d => format_f64(f64::from_le_bytes(blob[..8.min(blob.len())].try_into().unwrap_or([0; 8]))),  // float64
+        0x0e => {
+            // String: SerString — compressed length + UTF-8 bytes (0xFF = null).
+            if blob.first() == Some(&0xFF) {
+                return "null".into();
+            }
+            if let Ok((len, n)) = crate::metadata::streams::decode_compressed_uint(blob) {
+                let start = n;
+                let end = (start + len as usize).min(blob.len());
+                if let Ok(s) = std::str::from_utf8(&blob[start..end]) {
+                    return quote_string(s);
+                }
+            }
+            "\"\"".into()
+        }
+        0x12 => "null".into(), // CLASS — null reference constant
         _ => "0".into(),
     }
 }
 
+/// Render an f64 as a C# double literal, keeping a `.0` for integral values.
+fn format_f64(v: f64) -> String {
+    if v.is_finite() && v == v.trunc() && v.abs() < 1e15 {
+        format!("{v:.1}")
+    } else {
+        format!("{v}")
+    }
+}
+
 use crate::metadata::tables::decode_coded;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_constant_f64_default_param() {
+        // `double factor = 2.0` — the Constant blob is the raw IEEE-754 bits
+        // with element type R8 (0x0d). Regression: was rendered as its raw
+        // u64 bit pattern (4611686018427387904UL).
+        let bits = 2.0f64.to_le_bytes();
+        assert_eq!(format_constant(0x0d, &bits), "2.0");
+        let bits = 3.14f64.to_le_bytes();
+        assert_eq!(format_constant(0x0d, &bits), "3.14");
+    }
+
+    #[test]
+    fn format_constant_i4_and_string() {
+        // I4 is element type 0x08 (regression: table was shifted by 2).
+        assert_eq!(format_constant(0x08, &999i32.to_le_bytes()), "999");
+        assert_eq!(format_constant(0x08, &(-1i32).to_le_bytes()), "-1");
+        // String constants: compressed length + UTF-8 (SerString).
+        let blob = [4, b'b', b'o', b'o', b'k'];
+        assert_eq!(format_constant(0x0e, &blob), "\"book\"");
+    }
+
+    #[test]
+    fn drop_redundant_default_stores_only_entry_block() {
+        let mut out = vec![
+            "        V_0 = 0;".to_string(),
+            "        V_1 = null;".to_string(),
+            "        V_2 = 1;".to_string(),
+            "        for (V_3 = 0; ; ) {".to_string(),
+            "        V_0 = 0;".to_string(),
+        ];
+        drop_redundant_default_stores(&mut out);
+        assert_eq!(out[0], "");
+        assert_eq!(out[1], "");
+        // Non-default store stops the pass.
+        assert_eq!(out[2], "        V_2 = 1;");
+        // Inside the loop body is untouched.
+        assert_eq!(out[4], "        V_0 = 0;");
+    }
+
+    #[test]
+    fn cmp_branch_parenthesizes_looser_operands() {
+        // `a & 1 != 0` parses as `a & (1 != 0)` — needs parens.
+        let ins = Instruction {
+            offset: 0,
+            op: 0x2F,
+            name: "blt.s",
+            operand: Operand::ShortBrTarget(4),
+            size: 2,
+        };
+        let mut stack = vec!["a & 1".to_string(), "0".to_string()];
+        let mut out = Vec::new();
+        cmp_branch(&mut out, &mut stack, &ins, "<");
+        assert_eq!(out[0], "        if ((a & 1) < 0) goto Label_0006;");
+    }
+}

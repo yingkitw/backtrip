@@ -47,7 +47,9 @@
 
 ## Next — language features
 
-- [ ] `params` / `vararg` calling conventions
+- [x] `params` (ParamArray attribute → `params int[] xs` keyword)
+- [x] `vararg` signature parsing (SENTINEL → `...`; C# cannot declare vararg
+      methods, so covered by a unit test, not the fixture)
 
 ## Next — decompiler quality
 
@@ -61,17 +63,25 @@
 - [x] Reconstruct auto-properties from compiler-generated backing fields
 - [x] Reconstruct `string.Concat` chains back to `+` operators
 - [x] Reconstruct collection initializers (`new List() { ... }`)
+- [x] Reconstruct object initializers (`new T() { Prop = v }` collapse;
+      struct case via `default(T)` + member sets)
 - [x] Render `static` on static field declarations
 - [x] Strip generic arity backticks from class declarations (`Box`1` → `Box`)
-- [ ] Reconstruct object initializers (`new T() { Prop = v }` collapse)
-- [ ] Render generic parameters by name (`T`/`U`) instead of index-based `T0`/`!!0`
-- [ ] Strip namespace prefixes from same-namespace base classes (`Circle : Shapes.Shape` → `Circle : Shape`)
+- [x] Render generic parameters by name (`T`/`U`) instead of index-based
+      `T0`/`!!0` — `Reader::type_name_ctx` with class/method GenericParam names
+- [x] Strip namespace prefixes from same-namespace base classes
+      (`Circle : Shapes.Shape` → `Circle : Shape`) — cross-namespace bases
+      keep their qualified name
 
 ## Next — async / closures / state machines
 
 - [ ] `async`/`await` state-machine recognition and reversal
 - [x] Lambda / closure reconstruction (display class name cleanup)
-- [ ] Lambda / closure full inlining (display class → lambda expression)
+- [x] Lambda / closure inlining (display class → lambda expression) — direct
+      `new Func/Action<T...>(ctx, DisplayClass.lambda_N).Invoke(args)` becomes
+      `((T x) => body)(args)` with captured fields substituted. Block-bodied
+      lambdas, stored delegates, and multi-lambda display classes are left
+      as-is (safe degradation)
 - [ ] `yield` iterator state-machine reversal
 - [x] `is` patterns and `as` operator rendering (isinst/castclass cleanup)
 - [x] `switch` statement reconstruction (inlined case bodies + default)
@@ -82,7 +92,11 @@
 
 - [x] Recursive multi-assembly decompilation (`--recursive` on a directory)
 - [x] Structural verification (`--verify`): check all types/methods/fields appear in output
-- [ ] Full round-trip: recompile decompiled output and diff IL (verification)
+- [x] Round-trip test: decompile `tests/fixtures/roundtrip/Roundtrip.dll` →
+      recompile the decompiled C# with `dotnet` → re-decompile the result.
+      The output must BUILD (usings, name resolution, statement rendering)
+      and the recompiled assembly must expose the same type set. IL diffing
+      remains future work (recompiled IL never matches exactly).
 
 ## Brainstorming (competitive intelligence)
 

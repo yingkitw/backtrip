@@ -31,6 +31,13 @@ fn clean_type_name(full: &str) -> String {
         "System.Single" => "float".into(),
         "System.Double" => "double".into(),
         "System.Void" => "void".into(),
+        // Other System.* types render as their simple name; the emitted
+        // `using` directives (see `external_namespaces`) resolve them.
+        // `System.Collections.Generic.List` → `List`,
+        // `System.IO.StreamReader` → `StreamReader`.
+        _ if without_arity.starts_with("System.") => {
+            without_arity.rsplit('.').next().unwrap_or(without_arity).to_string()
+        }
         _ => without_arity.to_string(),
     }
 }
@@ -96,6 +103,25 @@ impl<'a> Reader<'a> {
     }
     pub fn type_ref_namespace(&self, row: &crate::metadata::tables::Row) -> String {
         self.string(row.col(2))
+    }
+
+    /// Distinct, sorted namespaces referenced by TypeRef rows (external
+    /// types only). Used to emit `using` directives so that stripped simple
+    /// names (`List`, `StreamReader`) resolve when the output is recompiled.
+    pub fn external_namespaces(&self) -> Vec<String> {
+        let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for r in self.tables.get(tbl::TYPEREF) {
+            let ns = self.type_ref_namespace(r);
+            if !ns.is_empty() {
+                set.insert(ns);
+            }
+        }
+        // `[DllImport]` is encoded in the ImplMap table (not a CustomAttribute
+        // TypeRef), so the interop namespace is invisible to the scan above.
+        if self.tables.row_count(tbl::IMPLMAP) > 0 {
+            set.insert("System.Runtime.InteropServices".into());
+        }
+        set.into_iter().collect()
     }
     pub fn type_ref_resolution_scope(&self, row: &crate::metadata::tables::Row) -> CodedIndex {
         decode_coded(Coded::ResolutionScope, row.col(0))
@@ -601,8 +627,23 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Render a Type as a C#-ish type name.
+    /// Render a Type as a C#-ish type name. Generic parameters resolve to
+    /// index-based fallbacks (`T{n}` / `!!{n}`) when no context is given.
     pub fn type_name(&self, t: &Type) -> String {
+        self.type_name_ctx(t, &[], &[])
+    }
+
+    /// Render a Type as a C#-ish type name, resolving generic parameters
+    /// against the declaring type's and method's GenericParam names
+    /// (`Type::Var(n)` → `class_params[n]`, `Type::MVar(n)` →
+    /// `method_params[n]`). Falls back to index-based `T{n}` / `!!{n}` when
+    /// the name lists are empty or the index is out of range.
+    pub fn type_name_ctx(
+        &self,
+        t: &Type,
+        class_params: &[String],
+        method_params: &[String],
+    ) -> String {
         match t {
             Type::Void => "void".into(),
             Type::Bool => "bool".into(),
@@ -622,26 +663,36 @@ impl<'a> Reader<'a> {
             Type::U => "UIntPtr".into(),
             Type::Object => "object".into(),
             Type::TypedRef => "TypedReference".into(),
-            Type::Ptr(inner) => format!("{}*", self.type_name(inner)),
-            Type::ByRef(inner) => format!("ref {}", self.type_name(inner)),
-            Type::SzArray(inner) => format!("{}[]", self.type_name(inner)),
+            Type::Ptr(inner) => format!("{}*", self.type_name_ctx(inner, class_params, method_params)),
+            Type::ByRef(inner) => format!("ref {}", self.type_name_ctx(inner, class_params, method_params)),
+            Type::SzArray(inner) => format!("{}[]", self.type_name_ctx(inner, class_params, method_params)),
             Type::Array(inner, shape) => {
                 let commas = ",".repeat(shape.rank.saturating_sub(1) as usize);
-                format!("{}[{}]", self.type_name(inner), commas)
+                format!("{}[{}]", self.type_name_ctx(inner, class_params, method_params), commas)
             }
             Type::ValueType(ci) | Type::Class(ci) => self.type_def_or_ref_name(*ci),
-            Type::Var(n) => format!("T{}", n),
-            Type::MVar(n) => format!("!!{}", n),
+            Type::Var(n) => class_params
+                .get(*n as usize)
+                .cloned()
+                .unwrap_or_else(|| format!("T{n}")),
+            Type::MVar(n) => method_params
+                .get(*n as usize)
+                .cloned()
+                .unwrap_or_else(|| format!("!!{n}")),
             Type::GenericInst(base, args) => {
                 let base_name = match base.as_ref() {
                     Type::ValueType(ci) | Type::Class(ci) => self.type_def_or_ref_name(*ci),
-                    other => self.type_name(other),
+                    other => self.type_name_ctx(other, class_params, method_params),
                 };
-                let args_str = args.iter().map(|a| self.type_name(a)).collect::<Vec<_>>().join(", ");
+                let args_str = args
+                    .iter()
+                    .map(|a| self.type_name_ctx(a, class_params, method_params))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("{base_name}<{args_str}>")
             }
             Type::FnPtr(_) => "delegate*".into(),
-            Type::Pinned(inner) => self.type_name(inner),
+            Type::Pinned(inner) => self.type_name_ctx(inner, class_params, method_params),
             Type::Sentinel => "...".into(),
         }
     }
