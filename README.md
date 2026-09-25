@@ -22,9 +22,10 @@ zero runtime dependencies.
 
 ## Why backtrip?
 
-Most .NET decompilers are large, C#-based tools that require a .NET runtime
-and, in the common case, a desktop GUI (ILSpy, dnSpy, dotPeek). backtrip
-deliberately takes the opposite trade-off:
+Most mainstream decompilers are large tools bound to a managed runtime —
+the .NET ones (ILSpy, dnSpy, dotPeek) are C#-based and need a .NET runtime,
+usually behind a desktop GUI, while the Java ones (CFR, Vineflower, Procyon)
+need a JVM. backtrip deliberately takes the opposite trade-off:
 
 - **One native binary, zero runtime dependencies** — written in Rust, it
   parses PE/CLI metadata and CIL directly. No .NET runtime, no JVM, no GUI:
@@ -47,10 +48,11 @@ deliberately takes the opposite trade-off:
 **When to reach for backtrip**: quick inspection on any machine; batch or
 recursive analysis of many assemblies; CI gates that must prove metadata
 survives decompilation; machine-readable extraction via JSON; headless
-pipelines. **When to reach for ILSpy / dnSpy / dotPeek**: interactive
-browsing, debugger-integrated inspection, or when you need the last few
-percent of C# reconstruction — `async`/`await` and `yield` state machines and
-full pattern matching are not there yet (see
+pipelines. **When to reach for ILSpy / dnSpy / dotPeek (or CFR / Vineflower
+on the Java side)**: interactive browsing, debugger-integrated inspection,
+or when you need the last few percent of source reconstruction — C#
+`async`/`await` and `yield` state machines, and Java lambda / method-reference
+reconstruction, are not there yet (see
 [Limitations](#limitations--roadmap)).
 
 ## Features
@@ -321,6 +323,8 @@ decompilation or javap-style disassembly, with `.jar` archives unpacked
 
 ## Comparison with Other Tools
 
+### .NET tools
+
 | Feature | backtrip | ildasm | ILSpy | dnSpy | dotPeek |
 | ------- | --------- | ------ | ----- | ----- | ------- |
 | Language | Rust | C++/CLI | C# | C# | C# |
@@ -347,10 +351,38 @@ decompilation or javap-style disassembly, with `.jar` archives unpacked
 - **dnSpy** — ILSpy-derived; adds a debugger and assembly editing. GUI-only.
 - **dotPeek** — JetBrains' free decompiler. Polished GUI plus PDB
   generation; Windows-centric.
-- **backtrip** — a headless, dependency-free alternative with verification
-  tooling the GUI tools lack. Choose it where a native binary, scripting, or
-  CI integration matters more than maximum C# fidelity — and use the
-  round-trip gate to *prove* the output compiles.
+
+### Java tools
+
+| Feature | backtrip | javap | CFR | Vineflower | Procyon |
+| ------- | --------- | ----- | --- | ---------- | ------- |
+| Language | Rust | Java (JDK) | Java | Java | Java |
+| License | Apache-2.0 | GPLv2 + Classpath exception | MIT | Apache-2.0 | Apache-2.0 |
+| CLI tool | Yes | Yes | Yes | Yes | Yes |
+| Bytecode disassembly | Yes | Yes | No | No | No |
+| Java decompilation | Partial | No | Full | Full | Full |
+| .NET decompilation | Yes (`.dll`/`.exe`) | No | No | No | No |
+| Zero runtime dependencies | Yes | No (JDK) | No (JRE) | No (JRE) | No (JRE) |
+| Round-trip compile gate | Yes | No | No | No | No |
+| JSON export | Yes | No | No | No | No |
+| Obfuscation detection | Yes | No | No | No | No |
+| Structural verification | Yes | No | No | No | No |
+| Recursive batch mode | Yes | No | No | No | No |
+
+- **javap** — the bytecode disassembler shipped with the JDK. The reference
+  for what `javac` actually emitted; disassembly only, no Java source
+  reconstruction.
+- **CFR** — a widely used open-source Java decompiler (MIT). Strong output
+  quality across modern Java syntax, usable as a CLI and a library. The
+  Java-side benchmark for reconstruction fidelity.
+- **Vineflower** — the actively developed Fernflower fork (Apache-2.0);
+  among the best Java reconstruction quality today, with IDE integrations.
+- **Procyon** — a solid Java decompiler (Apache-2.0) with good newer-syntax
+  handling; development has been mostly dormant.
+- **backtrip** — a headless, dependency-free alternative in both ecosystems,
+  with verification tooling the others lack. Choose it where a native
+  binary, scripting, or CI integration matters more than maximum source
+  fidelity — and use the round-trip gate to *prove* the output compiles.
 
 ## Limitations & Roadmap
 
