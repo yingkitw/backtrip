@@ -22,7 +22,8 @@ backtrip <INPUT> [-o <DIR>] [--il] [--list] [--type <NAME>] [--stdout]
          [--recursive] [--json] [--detect-obfuscation] [--verify]
 ```
 
-`INPUT` is an assembly, a class file, or (with `--recursive`) a directory.
+`INPUT` is an assembly, a class file, a jar archive, or (with `--recursive`)
+a directory.
 
 - Default action: decompile — C# (one `.cs` file per type) for .NET inputs,
   Java (one `.java` file) for class files — written to the output directory
@@ -37,9 +38,12 @@ backtrip <INPUT> [-o <DIR>] [--il] [--list] [--type <NAME>] [--stdout]
   nothing matches.
 - `--stdout`: print the matched type's source to stdout instead of writing
   files. For .NET requires `--type <NAME>` (exits non-zero with
-  `usage: --stdout requires --type <NAME>` otherwise); for Java class files
-  it works without `--type` since a class file holds exactly one class.
-  Works with `--il`.
+  `usage: --stdout requires --type <NAME>` otherwise); for Java inputs it
+  works without `--type` — a class file holds exactly one class, and a jar
+  prints every class entry. Works with `--il`.
+- `--recursive`: walk a directory and decompile every `.dll`/`.exe`/`.class`/
+  `.jar` file, each into its own subdirectory of the output directory.
+  Per-file failures are reported and do not stop the walk.
 - `--json`, `--detect-obfuscation`, `--verify`: .NET-only; class files exit
   non-zero with `usage: --<flag> is not supported for Java class files`.
 
@@ -65,18 +69,23 @@ backtrip <INPUT> [-o <DIR>] [--il] [--list] [--type <NAME>] [--stdout]
 
 ### Java
 
-1. **Class file parse** — `0xCAFEBABE` magic → minor/major version →
+1. **Jar unpacking** — for `PK\x03\x04` inputs, the zip end-of-central-
+   directory record is located by a backward scan (≤ 64 KiB comment), the
+   central directory parsed, and each `.class` entry's data read (stored or
+   raw-DEFLATE via the built-in RFC 1951 inflater; Zip64 not supported).
+   Broken class entries are skipped instead of failing the archive.
+2. **Class file parse** — `0xCAFEBABE` magic → minor/major version →
    constant pool (17 tags; `Long`/`Double` take two slots; modified UTF-8) →
    access flags → this/super/interfaces → fields → methods → class
    attributes (`Code` with exception table + LocalVariableTable,
    `ConstantValue`, `Exceptions`, `InnerClasses`, `Signature`,
    `BootstrapMethods`, `SourceFile`).
-2. **Descriptor parse** — JVMS 4.3 field/method descriptors to dotted Java
+3. **Descriptor parse** — JVMS 4.3 field/method descriptors to dotted Java
    type names.
-3. **JVM bytecode decode** — `Instruction` streams with typed operands;
+4. **JVM bytecode decode** — `Instruction` streams with typed operands;
    `wide` expanded, `tableswitch`/`lookupswitch` decoded with padding,
    branch targets absolutized (offsets are relative to the opcode address).
-4. **Emit** — javap-style disassembler or the Java decompiler writes output.
+5. **Emit** — javap-style disassembler or the Java decompiler writes output.
 
 ## Metadata tables
 
@@ -117,7 +126,10 @@ Same stack-machine architecture with Java-specific semantics:
 - Catch variables are named lazily at handler entry; javac's finally rethrow
   and self-covering EH ranges are suppressed/collapsed.
 - Post-passes reconstruct `for` loops (including `var` declarations),
-  ternaries, and boolean returns (`return x > 0;`).
+  enhanced-`for` (`for (var v : expr)` from javac's lowered iterator
+  pattern), `synchronized` blocks (monitor enter/exit + exception ranges),
+  ternaries, and boolean returns (`return x > 0;`). Unreferenced labels and
+  redundant `goto L;`/`L:` pairs are removed.
 - Leftover `goto`/labels are commented out — Java has no `goto`.
 - Enum constants, `values()`/`valueOf()`, `$VALUES`, bridge/synthetic
   members, and the implicit `extends Enum`/`Object`/`Record` are handled or

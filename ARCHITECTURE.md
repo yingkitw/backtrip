@@ -8,11 +8,13 @@ one control-flow engine:
 ```
 .NET:   .dll/.exe bytes → pe.rs → metadata/ → Reader → cil/ → decompile/csharp.rs → C#
 Java:   .class bytes    → java/classfile.rs → java/decoder.rs → decompile/java.rs  → Java
+        .jar bytes      → java/jar.rs (zip + raw-DEFLATE) ↘ (per .class entry)
                                                        ↘ java/disasm.rs        → javap-style
 ```
 
 Format detection happens in `main.rs` by magic bytes: `MZ` → .NET path,
-`0xCAFEBABE` → Java path. Both back ends emit a flat, goto-based statement
+`0xCAFEBABE` → Java path, `PK\x03\x04` → jar (unpacked, then the Java path
+per class entry). Both back ends emit a flat, goto-based statement
 list that is folded into structured source by the shared passes in
 `decompile/flow.rs` (if/else, while/do-while/for, switch, goto cleanup).
 
@@ -86,6 +88,11 @@ exposes `rva_to_offset` (used everywhere RVA resolution is needed) and
   decodes `tableswitch`/`lookupswitch` with 4-byte padding, and stores
   absolute branch targets.
 - `disasm` — javap-style text output for `--il` on class files.
+- `jar` — `.jar` archive support: locates the zip end-of-central-directory
+  record by a backward scan, walks the central directory, and reads entry
+  data with a built-in raw-DEFLATE (RFC 1951) decoder (stored entries pass
+  through). Broken `.class` entries are skipped rather than failing the
+  whole archive.
 
 ### `decompile`
 
@@ -124,6 +131,15 @@ Two back ends (`csharp.rs`, `java.rs`) plus a shared control-flow engine
   - `insert_exception_markers` — Java EH clauses have no explicit length; a
     handler region ends where the next handler starts, and javac's
     self-covering finally ranges are collapsed.
+- `json.rs` — `assembly_to_json` renders a structured JSON model (types,
+  fields, methods) for `--json`, built with manual string escaping (no
+  serde).
+- `obfuscation.rs` — `detect_obfuscation` scans for non-printable/very long
+  names, control-flow flattening (large switches), and string-encryption
+  patterns, formatted into a severity-tagged report.
+- `verify.rs` — `verify` checks that every metadata type/method/field name
+  appears in the decompiled output (`--verify`), skipping compiler-generated
+  members (accessors, delegates, backing fields) to avoid false positives.
 
 ### `output`
 
@@ -157,8 +173,20 @@ shelling out.
 
 ## Test strategy
 
-`tests/integration.rs` builds against `tests/fixtures/Sample.cs` (a small C#
-library compiled with `dotnet`) and asserts that decompiled output contains
-expected C# fragments (class/struct kinds, method signatures, arithmetic
-bodies, string concatenation, constructors, field access, `Math.Sqrt` calls).
-Unit tests cover the CIL decoder and compressed-integer decoding.
+- **.NET fragments** — `tests/integration.rs` loads the prebuilt
+  `tests/fixtures/bin/Release/net8.0/Sample.dll` and asserts that decompiled
+  output contains expected C# fragments (class/struct kinds, method
+  signatures, arithmetic bodies, control flow, initializers, lambdas,
+  properties/events/delegates, generics).
+- **Round-trip gate** — the prebuilt `Roundtrip.dll` is decompiled, the
+  output recompiled with `dotnet` (must be 0 errors), and the recompiled
+  assembly re-decompiled with the same type set.
+- **Java** — the same integration file covers class and jar fixtures:
+  fragment assertions, `--il` disassembly, and recompiling decompiled output
+  with `javac` (skipped when `javac` is absent).
+- **CLI smoke tests** — shell out to the built binary via
+  `CARGO_BIN_EXE_backtrip` for flag wiring and exit codes.
+- **Unit tests** live inline (`#[cfg(test)]`) in the decoders, metadata
+  streams/tables/signatures, `flow.rs`, and both decompiler back ends.
+- **Doc sync** — `tests/docs_sync.rs` fails `cargo test` when the AGENTS.md
+  module list or TODO.md test counts drift from the code.

@@ -151,8 +151,8 @@ Or build from source:
 cargo build --release
 ```
 
-The resulting binary is at `target/release/backtrip`. No .NET runtime is
-required to run backtrip — it parses PE files directly.
+The resulting binary is at `target/release/backtrip`. No .NET runtime or JVM
+is required to run backtrip — it parses PE files and class files directly.
 
 ## Usage
 
@@ -210,7 +210,7 @@ backtrip ./build/ --recursive -o out/
 | `--list`                | List types in the assembly and exit                          |
 | `--type <name>`         | Decompile only the matching type                             |
 | `--stdout`              | Print matched type to stdout (requires `--type`)             |
-| `--recursive`           | Decompile all `.dll`/`.exe` in a directory                   |
+| `--recursive`           | Decompile all `.dll`/`.exe`/`.class`/`.jar` in a directory    |
 | `--json`                | Export assembly metadata as JSON to stdout                   |
 | `--detect-obfuscation`  | Scan for obfuscation indicators and emit warnings             |
 | `--verify`              | Verify decompiled output against metadata                    |
@@ -231,20 +231,30 @@ src/
     opcodes.rs        full CIL opcode table (ECMA-335 III)
     decoder.rs        bytecode → Instruction stream
     disasm.rs         Instruction → IL text
+  java/
+    classfile.rs      JVMS ch. 4 class file parser (constant pool, members)
+    descriptor.rs     JVMS 4.3 field/method descriptors + generic Signature
+    opcodes.rs        full JVM opcode table (JVMS ch. 6)
+    decoder.rs        bytecode → Instruction stream
+    disasm.rs         javap-style bytecode text
+    jar.rs            .jar support (zip central directory + raw-DEFLATE decoder)
   decompile/
     csharp.rs         C# decompiler (expression-stack machine)
+    java.rs           Java decompiler (expression-stack machine, javac passes)
+    flow.rs           shared control-flow restructuring passes (both back ends)
     json.rs           JSON metadata export
     obfuscation.rs    obfuscation detection
     verify.rs         structural verification
   output.rs           per-type file writer
-  main.rs             CLI (clap)
+  main.rs             CLI (clap) + magic-byte format dispatch
   lib.rs              library root (for integration tests)
 examples/
   decompile.rs        library-usage example (parse → decompile → print)
 tests/
-  integration.rs      end-to-end tests against the Sample.dll fixture
-  fixtures/           Sample.cs (fragment assertions)
-  fixtures/roundtrip/ Roundtrip.cs (round-trip compile test fixture)
+  integration.rs      end-to-end tests (Sample.dll, Roundtrip.dll, java/jar
+                      fixtures, CLI smoke tests)
+  docs_sync.rs        doc-drift enforcement (fails cargo test on stale docs)
+  fixtures/           Sample.cs + Roundtrip.cs (.NET) and *.java + *.jar (Java)
 ```
 
 ## Tests
@@ -253,18 +263,29 @@ tests/
 cargo test
 ```
 
-The integration tests build a small C# fixture (`tests/fixtures/Sample.cs`)
-using the .NET SDK (version 8+) and assert the decompiler reproduces expected
-C# fragments — including control flow, switch statements, switch expressions,
-try/catch, using blocks, foreach, properties, events, delegates, nested types,
-enums, interfaces, abstract/virtual/override hierarchies, generic classes and
-methods, static constructors, arrays, and box/unbox/castclass conversions.
+The .NET integration tests run against a **prebuilt** fixture
+(`tests/fixtures/bin/Release/net8.0/Sample.dll`) and assert the decompiler
+reproduces expected C# fragments — including control flow, switch statements,
+switch expressions, try/catch, using blocks, foreach, properties, events,
+delegates, nested types, enums, interfaces, abstract/virtual/override
+hierarchies, generic classes and methods, static constructors, arrays, and
+box/unbox/castclass conversions. Rebuild the fixture with
+`cd tests/fixtures && dotnet build -c Release` (dotnet SDK 8+).
 
-A second fixture (`tests/fixtures/roundtrip/Roundtrip.cs`) drives the
+A second prebuilt fixture (`tests/fixtures/roundtrip/Roundtrip.dll`) drives the
 **round-trip test**: the decompiled output is recompiled with `dotnet` and
 must build (0 errors), then the recompiled assembly is re-decompiled and must
 expose the same type set. This validates that the emitted C# is actually
 compilable — usings, name resolution, and statement rendering.
+
+The Java integration tests run against prebuilt class files
+(`tests/fixtures/java/bin/demo/`) and jar archives, assert decompiled Java
+fragments, and recompile the decompiled output with `javac` (skipped when
+`javac` is absent). Rebuild with `javac -d tests/fixtures/java/bin
+tests/fixtures/java/*.java` (JDK 17+).
+
+Finally, `tests/docs_sync.rs` makes documentation drift a test failure: the
+AGENTS.md module list and TODO.md test counts must match the code.
 
 ## Library Usage
 
@@ -293,6 +314,11 @@ backtrip works in three stages:
    `switch`, `try`/`catch`), collapse patterns (`using`, `foreach`,
    collection initializers), and clean up compiler-generated names.
 
+For Java inputs the stages mirror this: class-file parsing (constant pool,
+members, attributes) → descriptor/`Signature` decoding → JVM bytecode
+decompilation or javap-style disassembly, with `.jar` archives unpacked
+(zip + inflate) before per-class decompilation.
+
 ## Comparison with Other Tools
 
 | Feature | backtrip | ildasm | ILSpy | dnSpy | dotPeek |
@@ -302,6 +328,7 @@ backtrip works in three stages:
 | CLI tool | Yes | Yes | Yes (`ilspycmd`) | No (GUI) | No (GUI) |
 | IL disassembly | Yes | Yes | Yes | Yes | Yes |
 | C# decompilation | Partial | No | Full | Full | Full |
+| Java decompilation | Yes (`.class`/`.jar`) | No | No | No | No |
 | Zero runtime dependencies | Yes | No (SDK) | No (.NET) | No (.NET) | No (.NET) |
 | Round-trip compile gate | Yes | No | No | No | No |
 | JSON export | Yes | No | No | No | No |
@@ -334,8 +361,10 @@ See [`TODO.md`](TODO.md) for the full roadmap. Notable upcoming work:
 - Switch expressions with type patterns and property patterns
 - Round-trip IL diffing (recompiled IL never matches exactly; semantic
   comparison is future work)
-- Java: `.jar` archives (stored/deflated entries), generic `Signature`
-  rendering in method bodies, lambda (`LambdaMetafactory`) reconstruction, generic signatures on methods
+- Java: generic type inference in method bodies (locals/`new` stay erased —
+  needs stack-map-frame analysis), lambda / method-reference reconstruction
+  (`LambdaMetafactory`), local-variable naming without `-g`, and Zip64 jar
+  archives
 
 ## License
 

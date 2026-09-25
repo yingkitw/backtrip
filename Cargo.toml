@@ -1,6 +1,6 @@
 [package]
 name = "backtrip"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "A decompiler in Rust — turns .NET assemblies (.dll/.exe) into C# and JVM class files (.class) into Java, with IL/javap-style disassembly and round-trip verification"
 license = "Apache-2.0"
