@@ -4,5 +4,7 @@ tests/fixtures/bin
 tests/fixtures/obj
 tests/fixtures/roundtrip/bin
 tests/fixtures/roundtrip/obj
+roundtrip_rt/recompile/bin
+roundtrip_rt/recompile/obj
 AGENTS.md
 MEMORY.md
