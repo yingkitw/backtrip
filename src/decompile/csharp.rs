@@ -1,3 +1,7 @@
+use super::flow::{
+    binop, conv, paren_if_needed, restructure_do_while_loops, restructure_for_loops,
+    restructure_if_else, restructure_switch, restructure_while_loops, strip_outer_parens, unop,
+};
 use crate::cil::decoder::{decode, Instruction, Operand};
 use crate::error::Result;
 use crate::metadata::reader::Reader;
@@ -64,7 +68,7 @@ pub fn decompile_type_by_name(reader: &Reader<'_>, query: &str) -> Result<Option
 
 fn file_name_for(ns: &str, name: &str) -> String {
     // Sanitize nested-type separators and generic arity markers.
-    let clean = name.replace('`', "_").replace('/', "_").replace('\\', "_");
+    let clean = name.replace(['`', '/', '\\'], "_");
     if ns.is_empty() {
         format!("{clean}.cs")
     } else {
@@ -184,8 +188,8 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
 
     // Base type / interfaces.
     let mut bases: Vec<String> = Vec::new();
-    if !is_interface && !is_struct && !is_enum {
-        if !base_full.is_empty() && base_simple != "Object" && base_simple != "object" {
+    if !is_interface && !is_struct && !is_enum
+        && !base_full.is_empty() && base_simple != "Object" && base_simple != "object" {
             // Same-namespace base → simple name; otherwise keep the
             // qualified name (System-prefix stripped).
             if base_type_namespace(reader, extends).as_deref() == Some(ns.as_str()) {
@@ -194,7 +198,6 @@ fn decompile_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
                 bases.push(base_full.clone());
             }
         }
-    }
     // Interface implementations.
     for ir in reader.tables.get(tbl::INTERFACEIMPL) {
         if ir.col(0) == row_idx {
@@ -390,9 +393,7 @@ fn decompile_nested_type(reader: &Reader<'_>, row_idx: u32) -> Result<String> {
 }
 
 fn base_type_name(reader: &Reader<'_>, extends: CodedIndex) -> Option<String> {
-    if extends.table.is_none() {
-        return None;
-    }
+    extends.table?;
     let n = reader.type_def_or_ref_name(extends);
     // Strip common "System." prefix for readability.
     Some(strip_system(&n))
@@ -516,18 +517,16 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
                 return format!("params {} {}", strip_system(&reader.type_name_ctx(t, class_params, &method_generic_names)), pname);
             }
             // Check for default value.
-            if let Some(&param_row) = param_defaults.get(&seq) {
-                if let Some((tc, blob)) = reader.constant_for_param(param_row) {
+            if let Some(&param_row) = param_defaults.get(&seq)
+                && let Some((tc, blob)) = reader.constant_for_param(param_row) {
                     let def = format_constant(tc, blob);
                     return format!("{} {} = {}", strip_system(&reader.type_name_ctx(t, class_params, &method_generic_names)), pname, def);
                 }
-            }
             // Check for out parameter (ByRef + Out flag → `out` instead of `ref`).
-            if param_is_out.contains(&seq) {
-                if let Type::ByRef(inner) = t {
+            if param_is_out.contains(&seq)
+                && let Type::ByRef(inner) = t {
                     return format!("out {} {}", strip_system(&reader.type_name_ctx(inner, class_params, &method_generic_names)), pname);
                 }
-            }
             format!("{} {}", strip_system(&reader.type_name_ctx(t, class_params, &method_generic_names)), pname)
         })
         .collect();
@@ -596,8 +595,8 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
     restructure_lambdas(reader, method_row, &mut body_lines);
     // Move a leading `base(...);` statement into a `: base(...)` initializer
     // (C# forbids `base();` as a body statement; it must be an initializer).
-    if is_ctor {
-        if let Some(idx) = body_lines.iter().position(|l| {
+    if is_ctor
+        && let Some(idx) = body_lines.iter().position(|l| {
             let t = l.trim();
             t.starts_with("base(") && t.ends_with(';') && !t.starts_with("//")
         }) {
@@ -605,7 +604,6 @@ fn decompile_method(reader: &Reader<'_>, m: &crate::metadata::tables::Row, metho
             body_lines[idx] = String::new();
             header.push_str(&format!(" : {base_call}"));
         }
-    }
     let body_src = body_lines.join("\n");
 
     let mut s = String::new();
@@ -674,9 +672,7 @@ fn decompile_body(
             out.push(format!("        Label_{:04X}:", ins.offset));
         }
 
-        if !offset_to_line.contains_key(&ins.offset) {
-            offset_to_line.insert(ins.offset, out.len());
-        }
+        offset_to_line.entry(ins.offset).or_insert_with(|| out.len());
 
         if !handle_instr(reader, ins, &mut stack, &mut out, param_names, &local_names, sig, is_static)? {
             // Unsupported instruction: emit a comment with the raw IL and reset.
@@ -734,11 +730,10 @@ fn decompile_body(
         .iter()
         .filter_map(|l| {
             let t = l.trim();
-            if let Some(rest) = t.strip_prefix("foreach (var ") {
-                if let Some(name) = rest.split(' ').next() {
+            if let Some(rest) = t.strip_prefix("foreach (var ")
+                && let Some(name) = rest.split(' ').next() {
                     return Some(name.to_string());
                 }
-            }
             None
         })
         .collect();
@@ -765,387 +760,6 @@ fn decompile_body(
     Ok(s)
 }
 
-/// Negate a comparison operator for if/else restructuring.
-/// `if (a >= b) goto L;` → `if (a < b) { ... }`
-fn negate_cond(cond: &str) -> String {
-    // If cond is `(!x)` or `!(x)`, strip the negation.
-    let trimmed = cond.trim();
-    if trimmed.starts_with("(!") && trimmed.ends_with(')') {
-        // `(!x)` → `(x)`
-        let inner = &trimmed[2..trimmed.len()-1];
-        return format!("({inner})");
-    }
-    if trimmed.starts_with("!(") && trimmed.ends_with(')') {
-        // `!(x)` → `(x)`
-        let inner = &trimmed[2..trimmed.len()-1];
-        return format!("({inner})");
-    }
-    // cond is like "(a >= b)" — find the operator and flip it.
-    let ops = [(">=", "<"), ("<=", ">"), (">", "<="), ("<", ">="), ("==", "!="), ("!=", "==")];
-    for (a, b) in ops {
-        if cond.contains(a) {
-            return cond.replacen(a, b, 1);
-        }
-    }
-    // No comparison operator found — wrap in `!(...)`.
-    format!("!{cond}")
-}
-
-/// Post-process the output lines to restructure `if (cond) goto Label;` + block
-/// + `Label:` into `if (!cond) { block }`.
-fn restructure_if_else(out: &mut Vec<String>) {
-    let mut i = 0;
-    while i < out.len() {
-        // Look for: `        if (cond) goto Label_XXXX;`
-        let line = &out[i];
-        let trimmed = line.trim();
-        if !trimmed.starts_with("if (") || !trimmed.contains(") goto Label_") {
-            i += 1;
-            continue;
-        }
-        // Extract the label name.
-        let label = match trimmed.rsplit("goto ").next() {
-            Some(s) => s.trim().trim_end_matches(';'),
-            None => { i += 1; continue; }
-        };
-        // Extract the condition (everything between "if (" and ") goto").
-        let cond_start = trimmed.find("if (").map(|p| p + 4).unwrap_or(0);
-        let cond_end = match trimmed[cond_start..].find(") goto") {
-            Some(p) => cond_start + p,
-            None => { i += 1; continue; }
-        };
-        let cond = format!("({})", &trimmed[cond_start..cond_end]);
-
-        // Find the label line (must be after the current line).
-        let label_pattern = format!("Label_{}:", label.trim_start_matches("Label_"));
-        let label_idx = out[i+1..].iter().position(|l| l.trim() == label_pattern);
-        let label_idx = match label_idx {
-            Some(p) => i + 1 + p,
-            None => { i += 1; continue; }
-        };
-
-        // The block between the if-line and the label is the "then" body.
-        // Check that the block is non-empty and ends with a return or goto.
-        if label_idx <= i + 1 {
-            i += 1;
-            continue;
-        }
-        let block_end = label_idx - 1;
-        let block_last = out[block_end].trim().to_string();
-        if !block_last.starts_with("return") && !block_last.starts_with("goto") {
-            i += 1;
-            continue;
-        }
-
-        // The block must not contain any label definition — a label inside
-        // would be re-indented out of reach of other jumps.
-        let block_has_label = out[i+1..label_idx].iter().any(|l| {
-            let t = l.trim();
-            t.starts_with("Label_") && t.ends_with(':')
-        });
-        if block_has_label {
-            i += 1;
-            continue;
-        }
-
-        // The target label must not be referenced by any other line —
-        // short-circuit operators (`||`/`&&`) branch to the same label from
-        // several places, and removing the label would orphan those gotos.
-        let label_name = label.trim();
-        let label_referenced_elsewhere = out.iter().enumerate().any(|(k, l)| {
-            k != i
-                && k != label_idx
-                && l
-                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                    .any(|tok| tok == label_name)
-        });
-        if label_referenced_elsewhere {
-            i += 1;
-            continue;
-        }
-
-        // Check for else: if the block ends with `goto Label_YYYY;` and there's
-        // another block between the current label and Label_YYYY.
-        let has_else = block_last.starts_with("goto ");
-        let else_label = if has_else {
-            block_last.trim_start_matches("goto ").trim_end_matches(';').to_string()
-        } else {
-            String::new()
-        };
-
-        // Restructure: replace the if-line with `if (!cond) {`
-        let neg_cond = negate_cond(&cond);
-        out[i] = format!("        if {neg_cond} {{");
-
-        // Indent the block lines by 4 spaces.
-        for j in (i+1)..label_idx {
-            if !out[j].trim().is_empty() {
-                out[j] = format!("    {}", out[j]);
-            }
-        }
-
-        if has_else {
-            // Find the else label.
-            let else_pattern = format!("Label_{}:", else_label.trim_start_matches("Label_"));
-            let else_idx = out[label_idx+1..].iter().position(|l| l.trim() == else_pattern)
-                .map(|p| label_idx + 1 + p);
-            if let Some(ei) = else_idx {
-                // Replace the current label with `} else {`
-                out[label_idx] = "        } else {".to_string();
-                // Indent the else block.
-                for j in (label_idx+1)..ei {
-                    if !out[j].trim().is_empty() {
-                        out[j] = format!("    {}", out[j]);
-                    }
-                }
-                // Replace the else label with `}`
-                out[ei] = "        }".to_string();
-                i = ei + 1;
-                continue;
-            }
-        }
-
-        // No else: replace the label with `}`
-        out[label_idx] = "        }".to_string();
-        i = label_idx + 1;
-    }
-}
-
-/// Post-process the output lines to restructure while loops from back-edges.
-/// Pattern:
-///   goto Label_XXXX;          (jump to condition check)
-///   Label_YYYY:               (loop body start)
-///   ... loop body ...
-///   Label_XXXX:               (loop header / condition check)
-///   if (cond) goto Label_YYYY;  (back-edge to loop body)
-///   ... after loop ...
-///
-/// Transforms to:
-///   while (!cond) {
-///     ... loop body ...
-///   }
-///   ... after loop ...
-fn restructure_while_loops(out: &mut Vec<String>) {
-    let mut i = 0;
-    while i < out.len() {
-        // Look for: `goto Label_XXXX;` (forward jump to loop header)
-        let line = &out[i];
-        let trimmed = line.trim();
-        if !trimmed.starts_with("goto Label_") {
-            i += 1;
-            continue;
-        }
-        let header_label = trimmed.trim_start_matches("goto ").trim_end_matches(';');
-
-        // Find the header label line (must be after current line).
-        let header_pattern = format!("Label_{}:", header_label.trim_start_matches("Label_"));
-        let header_idx = match out[i+1..].iter().position(|l| l.trim() == header_pattern) {
-            Some(p) => i + 1 + p,
-            None => { i += 1; continue; }
-        };
-
-        // The line after the header should be `if (cond) goto Label_YYYY;` (back-edge).
-        if header_idx + 1 >= out.len() {
-            i += 1;
-            continue;
-        }
-        let cond_line = out[header_idx + 1].trim().to_string();
-        if !cond_line.starts_with("if (") || !cond_line.contains(") goto Label_") {
-            i += 1;
-            continue;
-        }
-
-        // Extract the back-edge target (loop body start label).
-        let back_label = match cond_line.rsplit("goto ").next() {
-            Some(s) => s.trim().trim_end_matches(';'),
-            None => { i += 1; continue; }
-        };
-
-        // The back-edge target must be between the initial goto and the header.
-        let back_pattern = format!("Label_{}:", back_label.trim_start_matches("Label_"));
-        let body_start = match out[i+1..header_idx].iter().position(|l| l.trim() == back_pattern) {
-            Some(p) => i + 1 + p,
-            None => { i += 1; continue; }
-        };
-
-        // Extract the condition.
-        let cond_start = cond_line.find("if (").map(|p| p + 4).unwrap_or(0);
-        let cond_end = match cond_line[cond_start..].find(") goto") {
-            Some(p) => cond_start + p,
-            None => { i += 1; continue; }
-        };
-        let cond = format!("({})", &cond_line[cond_start..cond_end]);
-
-        // Restructure:
-        // 1. Replace the initial `goto Label_XXXX;` with `while (cond) {`
-        //    (the condition is NOT negated — the back-edge means "continue while true")
-        out[i] = format!("        while {cond} {{");
-
-        // 2. Remove the loop body start label (Label_YYYY:)
-        out[body_start] = String::new(); // will be filtered out
-
-        // 3. Indent the loop body (between body_start+1 and header_idx)
-        for j in (body_start+1)..header_idx {
-            if !out[j].trim().is_empty() {
-                out[j] = format!("    {}", out[j]);
-            }
-        }
-
-        // 4. Replace the header label with `}`
-        out[header_idx] = "        }".to_string();
-
-        // 5. Remove the back-edge if-line (it's now part of the while)
-        out[header_idx + 1] = String::new();
-
-        i = header_idx + 2;
-    }
-}
-
-/// Post-process the output lines to restructure do-while loops.
-/// Pattern:
-///   Label_XXXX:               (loop body start)
-///   ... loop body ...
-///   if (cond) goto Label_XXXX;  (back-edge to same label — no initial goto)
-///
-/// Transforms to:
-///   do {
-///     ... loop body ...
-///   } while (cond);
-fn restructure_do_while_loops(out: &mut Vec<String>) {
-    let mut i = 0;
-    while i < out.len() {
-        // Look for a label line: `Label_XXXX:`
-        let line = &out[i];
-        let trimmed = line.trim();
-        if !trimmed.starts_with("Label_") || !trimmed.ends_with(':') {
-            i += 1;
-            continue;
-        }
-        let label_name = trimmed.trim_end_matches(':');
-
-        // Exclude while loops: if the previous line is `goto Label_YYYY;`
-        // (jumping to a different label), this is a while loop header, not do-while.
-        if i > 0 {
-            let prev = out[i - 1].trim();
-            if prev.starts_with("goto Label_") && !prev.contains(&format!("goto {};", label_name)) {
-                i += 1;
-                continue;
-            }
-        }
-
-        // Search forward for `if (cond) goto Label_XXXX;` (back-edge to same label).
-        let back_pattern = format!("goto {};", label_name);
-        let back_idx = out[i+1..].iter().position(|l| l.trim().contains(&back_pattern) && l.trim().starts_with("if ("));
-        let back_idx = match back_idx {
-            Some(p) => i + 1 + p,
-            None => { i += 1; continue; }
-        };
-
-        // The back-edge line must be `if (cond) goto Label_XXXX;`
-        let back_line = out[back_idx].trim().to_string();
-        if !back_line.starts_with("if (") || !back_line.ends_with(';') {
-            i += 1;
-            continue;
-        }
-
-        // Extract the condition.
-        let cond_start = back_line.find("if (").map(|p| p + 4).unwrap_or(0);
-        let cond_end = match back_line[cond_start..].find(") goto") {
-            Some(p) => cond_start + p,
-            None => { i += 1; continue; }
-        };
-        let cond = format!("({})", &back_line[cond_start..cond_end]);
-
-        // Restructure:
-        // 1. Replace the label with `do {`
-        out[i] = "        do {".to_string();
-
-        // 2. Indent the loop body (between label and back-edge)
-        for j in (i+1)..back_idx {
-            if !out[j].trim().is_empty() {
-                out[j] = format!("    {}", out[j]);
-            }
-        }
-
-        // 3. Replace the back-edge with `} while (cond);`
-        out[back_idx] = format!("        }} while {cond};");
-
-        i = back_idx + 1;
-    }
-}
-
-/// Post-process: convert `init; while (cond) { body; increment; }` into
-/// `for (init; cond; increment) { body; }`.
-///
-/// Detection criteria:
-/// 1. A `while (cond) {` line where cond involves a variable V
-/// 2. The previous non-empty line is `V = <init>;`
-/// 3. The last non-empty line before the closing `}` is `V = (V <op> <delta>);`
-fn restructure_for_loops(out: &mut Vec<String>) {
-    let mut i = 0;
-    while i < out.len() {
-        // Look for `while (cond) {`
-        let line = &out[i];
-        let trimmed = line.trim();
-        if !trimmed.starts_with("while (") || !trimmed.ends_with('{') {
-            i += 1;
-            continue;
-        }
-
-        // Extract the loop variable from the condition.
-        // Condition is like `(V_1 <= n)` — take the first operand.
-        let cond_inner = trimmed.trim_start_matches("while (").trim_end_matches(") {");
-        let loop_var = match cond_inner.split_whitespace().next() {
-            Some(v) => v.trim(),
-            None => { i += 1; continue; }
-        };
-
-        // Check the previous non-empty line is `V = <init>;`
-        let init_idx = if i > 0 {
-            (0..i).rev().find(|&j| !out[j].trim().is_empty())
-        } else {
-            None
-        };
-        let init_idx = match init_idx {
-            Some(idx) => idx,
-            None => { i += 1; continue; }
-        };
-        let init_line = out[init_idx].trim().to_string();
-        if !init_line.starts_with(&format!("{loop_var} = ")) || !init_line.ends_with(';') {
-            i += 1;
-            continue;
-        }
-        let init_expr = &init_line[format!("{loop_var} = ").len()..].trim_end_matches(';');
-
-        // Find the closing `}` for this while loop.
-        let close_idx = match out[i+1..].iter().position(|l| l.trim() == "}") {
-            Some(p) => i + 1 + p,
-            None => { i += 1; continue; }
-        };
-
-        // Find the last non-empty line before `}` — should be the increment.
-        let incr_idx = (i+1..close_idx).rev().find(|&j| !out[j].trim().is_empty());
-        let incr_idx = match incr_idx {
-            Some(idx) => idx,
-            None => { i += 1; continue; }
-        };
-        let incr_line = out[incr_idx].trim().to_string();
-        // Increment must be `V = (V <op> <delta>);` or `V = <expr>;` involving V.
-        if !incr_line.starts_with(&format!("{loop_var} = ")) || !incr_line.ends_with(';') {
-            i += 1; continue;
-        }
-        let incr_expr = &incr_line[format!("{loop_var} = ").len()..].trim_end_matches(';');
-
-        // All criteria met — restructure as for loop.
-        let cond_str = cond_inner;
-        out[i] = format!("        for ({loop_var} = {init_expr}; {cond_str}; {loop_var} = {incr_expr}) {{");
-        // Remove the init line and increment line.
-        out[init_idx] = String::new();
-        out[incr_idx] = String::new();
-        i = close_idx + 1;
-    }
-}
-
 /// Post-process: reconstruct `lock (obj) { body }` from `Monitor.Enter`/
 /// `Monitor.Exit` patterns wrapped in try/finally.
 ///
@@ -1165,7 +779,7 @@ fn restructure_for_loops(out: &mut Vec<String>) {
 ///   }
 ///   Label_ZZZZ:
 ///   return;
-fn restructure_locks(out: &mut Vec<String>) {
+fn restructure_locks(out: &mut [String]) {
     let mut i = 0;
     while i < out.len() {
         // Look for `Threading.Monitor.Enter(...)` or `Monitor.Enter(...)`
@@ -1279,18 +893,14 @@ fn restructure_locks(out: &mut Vec<String>) {
         }
 
         // 6. Indent the body lines by 4 spaces
-        for j in body_start..body_end {
-            if !out[j].trim().is_empty() {
-                out[j] = format!("    {}", out[j]);
-            }
-        }
+        super::flow::indent_range(&mut out[..], body_start, body_end);
 
         // 7. Replace the try close `}` — keep it as `}`
         // (already is `}`)
 
         // 8. Remove the entire finally block (from `finally {` to its `}`)
-        for j in (try_close + 1)..=finally_close {
-            out[j] = String::new();
+        for line in out[try_close + 1..=finally_close].iter_mut() {
+            *line = String::new();
         }
 
         // 9. Remove the label after the finally (e.g. `Label_ZZZZ:`)
@@ -1321,7 +931,7 @@ fn restructure_locks(out: &mut Vec<String>) {
 ///   // end finally
 ///   }
 ///   Label_ZZZZ:
-fn restructure_using(out: &mut Vec<String>) {
+fn restructure_using(out: &mut [String]) {
     let mut i = 0;
     while i < out.len() {
         // Look for `try {` line
@@ -1411,15 +1021,11 @@ fn restructure_using(out: &mut Vec<String>) {
         }
 
         // 4. Indent the body lines by 4 spaces
-        for j in body_start..body_end {
-            if !out[j].trim().is_empty() {
-                out[j] = format!("    {}", out[j]);
-            }
-        }
+        super::flow::indent_range(&mut out[..], body_start, body_end);
 
         // 5. Remove the entire finally block
-        for j in (try_close + 1)..=finally_close {
-            out[j] = String::new();
+        for line in out[try_close + 1..=finally_close].iter_mut() {
+            *line = String::new();
         }
 
         // 6. Remove the label after the finally block
@@ -1451,7 +1057,7 @@ fn restructure_using(out: &mut Vec<String>) {
 ///   // end finally
 ///   }
 ///   Label_ZZZZ:
-fn restructure_foreach(out: &mut Vec<String>) {
+fn restructure_foreach(out: &mut [String]) {
     let mut i = 0;
     while i < out.len() {
         // Look for `V_X = <collection>.GetEnumerator();`
@@ -1553,19 +1159,18 @@ fn restructure_foreach(out: &mut Vec<String>) {
         out[while_close] = String::new();
 
         // 6. Indent the body lines (between current_idx+1 and while_close)
-        for j in (current_idx+1)..while_close {
-            if !out[j].trim().is_empty() {
-                // Remove extra indentation from the while body (it was indented by while)
-                // and re-indent for foreach
-                let stripped = out[j].trim_start();
-                out[j] = format!("            {}", stripped);
+        // Strip the while-body indentation and re-indent for foreach.
+        for line in out[current_idx + 1..while_close].iter_mut() {
+            if !line.trim().is_empty() {
+                *line = format!("            {}", line.trim_start());
             }
         }
 
         // 7. Remove the leave goto (between while_close and try_close)
-        for j in (while_close+1)..try_close {
-            if !out[j].trim().is_empty() && out[j].trim().starts_with("goto ") {
-                out[j] = String::new();
+        for line in out[while_close + 1..try_close].iter_mut() {
+            let t = line.trim();
+            if !t.is_empty() && t.starts_with("goto ") {
+                *line = String::new();
             }
         }
 
@@ -1573,8 +1178,8 @@ fn restructure_foreach(out: &mut Vec<String>) {
         // (already is `}`)
 
         // 9. Remove the entire finally block
-        for j in (try_close + 1)..=finally_close {
-            out[j] = String::new();
+        for line in out[try_close + 1..=finally_close].iter_mut() {
+            *line = String::new();
         }
 
         // 10. Remove the label after the finally block
@@ -1599,7 +1204,7 @@ fn restructure_foreach(out: &mut Vec<String>) {
 /// Transforms to:
 ///   new Type() { x, y, ... }
 /// (and removes the Add lines, replacing the temp usage with the initializer)
-fn restructure_collection_initializers(out: &mut Vec<String>) {
+fn restructure_collection_initializers(out: &mut [String]) {
     let mut i = 0;
     while i < out.len() {
         // Look for `[var ]V_tmp_N = new Type();`
@@ -1623,7 +1228,7 @@ fn restructure_collection_initializers(out: &mut Vec<String>) {
         let mut j = i + 1;
         while j < out.len() {
             let t = out[j].trim();
-            if t == &format!("{temp_var}.Add();") {
+            if t == format!("{temp_var}.Add();") {
                 break;
             }
             let prefix = format!("{temp_var}.Add(");
@@ -1651,9 +1256,10 @@ fn restructure_collection_initializers(out: &mut Vec<String>) {
         out[i] = format!("{indent}{var_prefix}{temp_var} = {initializer};");
 
         // Remove the Add lines.
-        for k in (i+1)..j {
-            if out[k].trim().starts_with(&format!("{temp_var}.Add(")) {
-                out[k] = String::new();
+        let add_line = format!("{temp_var}.Add(");
+        for line in out[i + 1..j].iter_mut() {
+            if line.trim().starts_with(&add_line) {
+                *line = String::new();
             }
         }
 
@@ -1684,7 +1290,7 @@ fn restructure_collection_initializers(out: &mut Vec<String>) {
 /// Transforms to:
 ///   V_tmp_0 = new Type(args) { Member1 = v1, Member2 = v2 };
 ///   V_0 = new Type { Member1 = v1, Member2 = v2 };
-fn restructure_object_initializers(out: &mut Vec<String>) {
+fn restructure_object_initializers(out: &mut [String]) {
     let mut i = 0;
     while i < out.len() {
         let line = out[i].clone();
@@ -1750,8 +1356,8 @@ fn restructure_object_initializers(out: &mut Vec<String>) {
         // `new T() { ... }` → `new T { ... }`.
         let base = ctor_expr.strip_suffix("()").unwrap_or(&ctor_expr);
         out[i] = format!("{indent}{var_prefix}{temp_var} = {base} {{ {init} }};");
-        for k in (i + 1)..j {
-            out[k] = String::new();
+        for line in out[i + 1..j].iter_mut() {
+            *line = String::new();
         }
         i = j;
     }
@@ -1771,7 +1377,7 @@ fn restructure_object_initializers(out: &mut Vec<String>) {
 ///
 /// Any deviation from the pattern (missing/unordered elements, other uses of
 /// the temp) leaves the output unchanged (safe).
-fn restructure_concat_arrays(out: &mut Vec<String>) {
+fn restructure_concat_arrays(out: &mut [String]) {
     let mut i = 0;
     while i < out.len() {
         let line = out[i].clone();
@@ -1949,7 +1555,7 @@ fn restructure_concat_arrays(out: &mut Vec<String>) {
 /// The lambda body is decompiled from the display class's lambda_N method;
 /// captured fields (`this.f`) are replaced by their initializer values.
 /// Any deviation from the pattern leaves the output unchanged (safe).
-fn restructure_lambdas(reader: &Reader<'_>, method_row: u32, out: &mut Vec<String>) {
+fn restructure_lambdas(reader: &Reader<'_>, method_row: u32, out: &mut [String]) {
     // Collect display-class object initializers: temp -> (field -> value).
     let mut captures: std::collections::HashMap<String, std::collections::HashMap<String, String>> =
         std::collections::HashMap::new();
@@ -2112,87 +1718,6 @@ fn lambda_body(
     None
 }
 
-/// Post-process: reconstruct switch statements by inlining case bodies.
-/// Pattern:
-///   switch (v)
-///   {
-///       case 0: goto Label_AAAA;
-///       case 1: goto Label_BBBB;
-///       ...
-///   }
-///   goto Label_ZZZZ;          ← default fallthrough
-///   Label_AAAA:
-///   ... case 0 body ...
-///   Label_BBBB:
-///   ... case 1 body ...
-///   Label_ZZZZ:
-///   ... default body ...
-///
-/// Transforms to:
-///   switch (v)
-///   {
-///       case 0:
-///           ... case 0 body ...
-///       case 1:
-///           ... case 1 body ...
-///       default:
-///           ... default body ...
-///   }
-/// Detect if a switch follows the switch-expression pattern: all case
-/// bodies end with `goto Label_XXXX;` targeting the same label.
-/// Returns the common label if detected, None otherwise.
-fn detect_switch_expr_pattern(
-    cases: &[(usize, String)],
-    label_bodies: &std::collections::HashMap<String, Vec<String>>,
-) -> Option<String> {
-    let mut common_label: Option<String> = None;
-    let mut all_match = true;
-
-    for (_, label) in cases {
-        if let Some(body) = label_bodies.get(label) {
-            // Check if the last line is `goto Label_XXXX;`
-            if let Some(last) = body.last() {
-                let last_trimmed = last.trim();
-                if last_trimmed.starts_with("goto Label_") && last_trimmed.ends_with(';') {
-                    // Extract just `Label_XXXX` from `goto Label_XXXX;`
-                    let goto_label = last_trimmed
-                        .strip_prefix("goto ")
-                        .unwrap_or(last_trimmed)
-                        .trim_end_matches(';')
-                        .to_string();
-                    if let Some(ref cl) = common_label {
-                        if cl != &goto_label {
-                            all_match = false;
-                            break;
-                        }
-                    } else {
-                        common_label = Some(goto_label);
-                    }
-                } else {
-                    all_match = false;
-                    break;
-                }
-            } else {
-                all_match = false;
-                break;
-            }
-        } else {
-            all_match = false;
-            break;
-        }
-    }
-
-    // Also check the default case (if present) — it should NOT have a goto
-    // (the default is the fallthrough, no goto needed).
-    // Actually, the default body might or might not have a goto. If it does,
-    // it should target the same label.
-
-    if all_match {
-        common_label
-    } else {
-        None
-    }
-}
 
 /// Post-process: drop entry-block stores of default values that are already
 /// guaranteed by the `V_N = default;` local declarations. Recompiling
@@ -2200,7 +1725,7 @@ fn detect_switch_expr_pattern(
 /// (csc only eliminates the default store when no branch intervenes), so
 /// keeping the explicit store breaks the compile→decompile fixed point.
 /// Only leading straight-line stores are considered; control flow stops pass.
-fn drop_redundant_default_stores(out: &mut Vec<String>) {
+fn drop_redundant_default_stores(out: &mut [String]) {
     const DEFAULTS: [&str; 9] = ["0", "false", "null", "0.0", "0f", "0.0f", "0L", "0UL", "0u"];
     for line in out.iter_mut() {
         let t = line.trim();
@@ -2224,210 +1749,6 @@ fn drop_redundant_default_stores(out: &mut Vec<String>) {
     }
 }
 
-fn restructure_switch(out: &mut Vec<String>) {
-    let mut i = 0;
-    while i < out.len() {
-        // Look for `switch (...)`
-        if !out[i].trim().starts_with("switch (") || !out[i].trim().ends_with(")") {
-            i += 1;
-            continue;
-        }
-
-        // Next line should be `{`
-        if i + 1 >= out.len() || out[i + 1].trim() != "{" {
-            i += 1;
-            continue;
-        }
-
-        // Collect case labels: `case N: goto Label_XXXX;`
-        let mut cases: Vec<(usize, String)> = Vec::new(); // (case_num, label)
-        let mut j = i + 2;
-        while j < out.len() {
-            let t = out[j].trim();
-            if let Some(rest) = t.strip_prefix("case ") {
-                if let Some(goto_pos) = rest.find(": goto ") {
-                    let case_num = &rest[..goto_pos];
-                    let label_part = &rest[goto_pos + 7..].trim_end_matches(';');
-                    if let Ok(n) = case_num.parse::<usize>() {
-                        cases.push((n, label_part.to_string()));
-                        j += 1;
-                        continue;
-                    }
-                }
-            }
-            break;
-        }
-
-        if cases.is_empty() {
-            i += 1;
-            continue;
-        }
-
-        // j should now be at the switch close `}`
-        if j >= out.len() || out[j].trim() != "}" {
-            i += 1;
-            continue;
-        }
-        let switch_close = j;
-
-        // After the switch close, there should be a `goto Label_ZZZZ;` (default)
-        let default_goto_idx = switch_close + 1;
-        let default_label = if default_goto_idx < out.len() {
-            let t = out[default_goto_idx].trim();
-            if t.starts_with("goto Label_") {
-                Some(t["goto ".len()..].trim_end_matches(';').to_string())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Collect all labels AFTER the switch close + default goto.
-        let search_start = default_goto_idx + 1;
-        let mut all_labels: Vec<(usize, String)> = Vec::new();
-        for k in search_start..out.len() {
-            let t = out[k].trim();
-            if t.starts_with("Label_") && t.ends_with(':') {
-                all_labels.push((k, t.trim_end_matches(':').to_string()));
-            }
-        }
-
-        // Build a map: label → body lines (until the next label or method close).
-        let mut label_bodies: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-        for (idx, (line_idx, label)) in all_labels.iter().enumerate() {
-            let body_start = line_idx + 1;
-            let body_end = if idx + 1 < all_labels.len() {
-                all_labels[idx + 1].0
-            } else {
-                // Find the method close `}` — stop before it.
-                let mut end = out.len();
-                for k in body_start..out.len() {
-                    if out[k].trim() == "}" {
-                        end = k;
-                        break;
-                    }
-                }
-                end
-            };
-            let body: Vec<String> = out[body_start..body_end].iter()
-                .filter(|l| !l.trim().is_empty())
-                .cloned()
-                .collect();
-            label_bodies.insert(label.clone(), body);
-        }
-
-        // Build the new switch block.
-        // Check if this is a switch expression pattern: all case bodies
-        // end with `goto Label_XXXX;` targeting the same label, and that
-        // label has `return V_N;` or `V_N = ...;`.
-        let switch_expr_label = detect_switch_expr_pattern(&cases, &label_bodies);
-
-        let mut new_lines: Vec<String> = Vec::new();
-        new_lines.push(out[i].clone()); // `switch (v)`
-        new_lines.push("        {".into());
-
-        for (case_num, label) in &cases {
-            new_lines.push(format!("            case {case_num}:"));
-            if let Some(body) = label_bodies.get(label) {
-                for bl in body {
-                    let stripped = bl.trim_start();
-                    // Skip the `goto Label_XXXX;` if it's the switch expr pattern.
-                    if let Some(se_label) = &switch_expr_label {
-                        if stripped == &format!("goto {se_label};") {
-                            continue;
-                        }
-                    }
-                    new_lines.push(format!("                {stripped}"));
-                }
-                // Add `break;` after case body if the goto was removed
-                // (switch expression pattern).
-                if switch_expr_label.is_some() {
-                    // Only add break if the last line wasn't a return.
-                    let has_return = body.last().map(|l| l.trim().starts_with("return")).unwrap_or(false);
-                    if !has_return {
-                        new_lines.push("                break;".into());
-                    }
-                }
-            }
-        }
-
-        // Default case.
-        if let Some(default_label) = &default_label {
-            if let Some(body) = label_bodies.get(default_label) {
-                new_lines.push("            default:".into());
-                for bl in body {
-                    let stripped = bl.trim_start();
-                    if let Some(se_label) = &switch_expr_label {
-                        if stripped == &format!("goto {se_label};") {
-                            continue;
-                        }
-                    }
-                    new_lines.push(format!("                {stripped}"));
-                }
-                if switch_expr_label.is_some() {
-                    let has_return = body.last().map(|l| l.trim().starts_with("return")).unwrap_or(false);
-                    if !has_return {
-                        new_lines.push("                break;".into());
-                    }
-                }
-            }
-        }
-
-        new_lines.push("        }".into());
-
-        // Find the end of the old switch block to replace.
-        // It extends from `switch (v)` to the end of the last referenced
-        // label's body.
-        let mut last_line = switch_close;
-        let mut referenced_labels: Vec<&String> = cases.iter().map(|(_, l)| l)
-            .chain(default_label.as_ref())
-            .collect();
-        // If this is a switch expression pattern, also include the common
-        // goto target label so its body (e.g. `return V_0;`) is replaced.
-        if let Some(se_label) = &switch_expr_label {
-            referenced_labels.push(se_label);
-        }
-        for (idx, (label_line, label)) in all_labels.iter().enumerate() {
-            if referenced_labels.contains(&label) {
-                let body_end = if idx + 1 < all_labels.len() {
-                    all_labels[idx + 1].0
-                } else {
-                    // Find the method close `}`.
-                    let mut end = out.len();
-                    for k in (label_line + 1)..out.len() {
-                        if out[k].trim() == "}" {
-                            end = k;
-                            break;
-                        }
-                    }
-                    end
-                };
-                if body_end > last_line {
-                    last_line = body_end;
-                }
-            }
-        }
-
-        // If switch expression pattern, append the return/assignment from
-        // the common goto target label's body after the switch block.
-        if let Some(se_label) = &switch_expr_label {
-            if let Some(body) = label_bodies.get(se_label) {
-                for bl in body {
-                    let stripped = bl.trim_start();
-                    new_lines.push(format!("        {stripped}"));
-                }
-            }
-        }
-
-        // Replace the old switch block with the new one.
-        let replace_count = last_line - i;
-        out.splice(i..i + replace_count, new_lines.iter().cloned());
-
-        // Skip past the new switch block.
-        i += new_lines.len();
-    }
-}
 
 /// Clean up compiler-generated display class names.
 /// `<>c__DisplayClass32_0` → `DisplayClass`
@@ -2436,12 +1757,11 @@ fn clean_display_class_name(name: &str) -> String {
     if name.contains("<>c__DisplayClass") {
         return "DisplayClass".to_string();
     }
-    if name.contains("b__") {
-        if let Some(pos) = name.find("b__") {
+    if name.contains("b__")
+        && let Some(pos) = name.find("b__") {
             let suffix = &name[pos + 3..];
             return format!("lambda_{suffix}");
         }
-    }
     // Strip generic arity backtick: `Box`1` → `Box`.
     if let Some(pos) = name.find('`') {
         return name[..pos].to_string();
@@ -2457,11 +1777,10 @@ pub fn clean_display_class_name_pub(name: &str) -> String {
 /// Clean up compiler-generated field names.
 /// `<Count>k__BackingField` → `Count`
 fn clean_field_name(fname: &str) -> String {
-    if fname.starts_with('<') {
-        if let Some(end) = fname.find('>') {
+    if fname.starts_with('<')
+        && let Some(end) = fname.find('>') {
             return fname[1..end].to_string();
         }
-    }
     fname.to_string()
 }
 
@@ -2558,7 +1877,7 @@ fn collect_targets(instrs: &[Instruction]) -> std::collections::HashSet<usize> {
     for ins in instrs {
         match &ins.operand {
             Operand::BrTarget(o) => {
-                set.insert(target_offset(ins.offset, ins.size, *o as i32));
+                set.insert(target_offset(ins.offset, ins.size, *o));
             }
             Operand::ShortBrTarget(o) => {
                 set.insert(target_offset(ins.offset, ins.size, *o as i32));
@@ -2597,6 +1916,7 @@ fn arg_name(param_names: &[String], is_static: bool, idx: u32) -> String {
 }
 
 /// Handle one instruction. Returns Ok(true) if handled, Ok(false) if unsupported.
+#[allow(clippy::too_many_arguments)]
 fn handle_instr(
     reader: &Reader<'_>,
     ins: &Instruction,
@@ -3087,136 +2407,6 @@ fn store_local(out: &mut Vec<String>, stack: &mut Vec<String>, local_names: &[St
     out.push(format!("        {lname} = {v};"));
 }
 
-/// Precedence level of a binary operator (higher = binds tighter).
-/// Returns 0 for unknown operators.
-fn prec(op: &str) -> u8 {
-    match op {
-        "*" | "/" | "%" => 7,
-        "+" | "-" => 6,
-        "<<" | ">>" => 5,
-        "<" | "<=" | ">" | ">=" | "==" | "!=" => 4,
-        "&" => 3,
-        "^" => 2,
-        "|" => 1,
-        "&&" | "||" => 0,
-        _ => 0,
-    }
-}
-
-/// Strip outer parentheses from an expression if present.
-fn strip_outer_parens(s: &str) -> &str {
-    let t = s.trim();
-    if t.starts_with('(') && t.ends_with(')') {
-        // Check the parens are balanced and match.
-        let inner = &t[1..t.len()-1];
-        let mut depth = 0;
-        for (i, c) in inner.chars().enumerate() {
-            match c {
-                '(' => depth += 1,
-                ')' => {
-                    if depth == 0 {
-                        // Unbalanced — these parens don't match.
-                        return t;
-                    }
-                    depth -= 1;
-                }
-                _ => {}
-            }
-            let _ = i;
-        }
-        if depth == 0 {
-            return inner.trim();
-        }
-    }
-    t
-}
-
-/// Get the top-level operator of an expression (for precedence comparison).
-/// Returns None for atoms (variables, literals, calls).
-fn top_op(s: &str) -> Option<&str> {
-    let t = strip_outer_parens(s);
-    // If the stripped expression still has parens at top level, it's an atom.
-    // Find the lowest-precedence operator at depth 0.
-    let mut depth = 0;
-    let mut best: Option<(&str, usize)> = None;
-    let bytes = t.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            _ if depth == 0 => {
-                // Check for two-char operators.
-                let two = if i + 1 < bytes.len() {
-                    std::str::from_utf8(&bytes[i..i+2]).ok()
-                } else { None };
-                if let Some(two) = two {
-                    if matches!(two, "<<" | ">>" | "<=" | ">=" | "==" | "!=" | "&&" | "||") {
-                        let p = prec(two) as usize;
-                        if best.map(|(_, bp)| p <= bp).unwrap_or(true) {
-                            best = Some((two, p));
-                        }
-                        i += 2;
-                        continue;
-                    }
-                }
-                let one = std::str::from_utf8(&bytes[i..i+1]).ok();
-                if let Some(one) = one {
-                    if matches!(one, "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<" | ">") {
-                        let p = prec(one) as usize;
-                        if best.map(|(_, bp)| p <= bp).unwrap_or(true) {
-                            best = Some((one, p));
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    best.map(|(op, _)| op)
-}
-
-fn binop(stack: &mut Vec<String>, op: &str) {
-    let b = stack.pop().unwrap_or_else(|| "/*?*/".into());
-    let a = stack.pop().unwrap_or_else(|| "/*?*/".into());
-    let my_prec = prec(op);
-    // Strip outer parens from operands if their top-level op has >= precedence.
-    let a_stripped = if top_op(&a).map(|o| prec(o) >= my_prec).unwrap_or(true) {
-        strip_outer_parens(&a)
-    } else {
-        a.as_str()
-    };
-    let b_stripped = if top_op(&b).map(|o| prec(o) > my_prec).unwrap_or(true) {
-        strip_outer_parens(&b)
-    } else {
-        b.as_str()
-    };
-    stack.push(format!("{a_stripped} {op} {b_stripped}"));
-}
-
-fn unop(stack: &mut Vec<String>, op: &str) {
-    let a = stack.pop().unwrap_or_else(|| "/*?*/".into());
-    stack.push(format!("{op}{a}"));
-}
-
-fn conv(stack: &mut Vec<String>, ty: &str) {
-    let a = stack.pop().unwrap_or_else(|| "/*?*/".into());
-    let a_stripped = strip_outer_parens(&a);
-    stack.push(format!("({ty})({a_stripped})"));
-}
-
-/// Wrap an operand in parens if its top-level operator binds looser than the
-/// comparison operator it is fed to (`a & 1 != 0` parses wrong without them).
-fn paren_if_needed(e: &str, op: &str) -> String {
-    let s = strip_outer_parens(e);
-    if top_op(s).map(|o| prec(o) < prec(op)).unwrap_or(false) {
-        format!("({s})")
-    } else {
-        s.to_string()
-    }
-}
-
 fn cmp_op(stack: &mut Vec<String>, op: &str) {
     let b = stack.pop().unwrap_or_else(|| "/*?*/".into());
     let a = stack.pop().unwrap_or_else(|| "/*?*/".into());
@@ -3237,7 +2427,7 @@ fn cmp_branch(out: &mut Vec<String>, stack: &mut Vec<String>, ins: &Instruction,
 
 fn branch_target_of(ins: &Instruction) -> usize {
     match &ins.operand {
-        Operand::BrTarget(o) => target_offset(ins.offset, ins.size, *o as i32),
+        Operand::BrTarget(o) => target_offset(ins.offset, ins.size, *o),
         Operand::ShortBrTarget(o) => target_offset(ins.offset, ins.size, *o as i32),
         _ => ins.offset,
     }
@@ -3423,11 +2613,10 @@ fn property_name_for_accessor(reader: &Reader<'_>, tok: u32) -> Option<String> {
 fn type_token_is_enum(reader: &Reader<'_>, tok: u32) -> bool {
     let table = (tok >> 24) as u8;
     let row = (tok & 0x00FF_FFFF) as usize;
-    if table == tbl::TYPEDEF {
-        if let Some(r) = reader.tables.get(tbl::TYPEDEF).get(row - 1) {
+    if table == tbl::TYPEDEF
+        && let Some(r) = reader.tables.get(tbl::TYPEDEF).get(row - 1) {
             return strip_system(&reader.type_def_or_ref_name(reader.type_def_extends(r))) == "Enum";
         }
-    }
     false
 }
 
@@ -3472,13 +2661,11 @@ fn type_token_is_value(reader: &Reader<'_>, tok: u32) -> bool {    let table = (
 fn field_token_is_bool(reader: &Reader<'_>, tok: u32) -> bool {
     let table = (tok >> 24) as u8;
     let row = (tok & 0x00FF_FFFF) as usize;
-    if table == tbl::FIELD {
-        if let Some(r) = reader.tables.get(tbl::FIELD).get(row - 1) {
-            if let Ok(t) = reader.field_type(r) {
+    if table == tbl::FIELD
+        && let Some(r) = reader.tables.get(tbl::FIELD).get(row - 1)
+            && let Ok(t) = reader.field_type(r) {
                 return matches!(t, Type::Bool);
             }
-        }
-    }
     false
 }
 
@@ -3512,7 +2699,7 @@ fn deref_or_plain(param_names: &[String], sig: &MethodSig, addr: &str) -> String
 fn byref_keyword(reader: &Reader<'_>, tok: u32, i: usize, arg: &str) -> &'static str {
     let table = (tok >> 24) as u8;
     if table == tbl::METHODDEF {
-        let method_row = (tok & 0x00FF_FFFF) as u32;
+        let method_row = tok & 0x00FF_FFFF;
         let seq = (i + 1) as u16;
         let rows = reader.method_param_rows(method_row);
         for r in reader.tables.get(tbl::PARAM)[rows].iter() {
@@ -3623,8 +2810,8 @@ fn format_constant(type_code: u8, blob: &[u8]) -> String {
                 None => "0".into(),
             }
         }
-        0x04 => i8::from_le_bytes([blob.get(0).copied().unwrap_or(0)]).to_string(),       // int8
-        0x05 => u8::from_le_bytes([blob.get(0).copied().unwrap_or(0)]).to_string(),       // uint8
+        0x04 => i8::from_le_bytes([blob.first().copied().unwrap_or(0)]).to_string(),       // int8
+        0x05 => u8::from_le_bytes([blob.first().copied().unwrap_or(0)]).to_string(),       // uint8
         0x06 => i16::from_le_bytes(blob[..2.min(blob.len())].try_into().unwrap_or([0, 0])).to_string(),  // int16
         0x07 => u16::from_le_bytes(blob[..2.min(blob.len())].try_into().unwrap_or([0, 0])).to_string(),  // uint16
         0x08 => i32::from_le_bytes(blob[..4.min(blob.len())].try_into().unwrap_or([0, 0, 0, 0])).to_string(),  // int32
@@ -3640,7 +2827,7 @@ fn format_constant(type_code: u8, blob: &[u8]) -> String {
             }
             if let Ok((len, n)) = crate::metadata::streams::decode_compressed_uint(blob) {
                 let start = n;
-                let end = (start + len as usize).min(blob.len());
+                let end = (start + len).min(blob.len());
                 if let Ok(s) = std::str::from_utf8(&blob[start..end]) {
                     return quote_string(s);
                 }

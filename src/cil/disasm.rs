@@ -33,7 +33,7 @@ fn format_operand(reader: &Reader<'_>, ins: &Instruction, all: &[Instruction]) -
         Operand::I64(v) => format!("0x{:X}", v),
         Operand::R4(v) => format!("{v}"),
         Operand::R8(v) => format!("{v}"),
-        Operand::BrTarget(o) => label_for(all, target_off(ins.offset, ins.size, *o as i32)),
+        Operand::BrTarget(o) => label_for(all, target_off(ins.offset, ins.size, *o)),
         Operand::ShortBrTarget(o) => label_for(all, target_off(ins.offset, ins.size, *o as i32)),
         Operand::Switch(targets) => {
             let base = ins.offset + ins.size;
@@ -84,11 +84,10 @@ pub fn format_token(reader: &Reader<'_>, tok: u32) -> String {
             }
         }
         tbl::TYPESPEC => {
-            if let Some(r) = reader.tables.get(tbl::TYPESPEC).get(row - 1) {
-                if let Ok(t) = crate::metadata::signatures::parse_type(reader.blob(r.col(0))) {
+            if let Some(r) = reader.tables.get(tbl::TYPESPEC).get(row - 1)
+                && let Ok(t) = crate::metadata::signatures::parse_type(reader.blob(r.col(0))) {
                     return reader.type_name(&t);
                 }
-            }
         }
         tbl::METHODDEF => {
             if let Some(r) = reader.tables.get(tbl::METHODDEF).get(row - 1) {

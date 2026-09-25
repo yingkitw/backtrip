@@ -1,4 +1,4 @@
-# backtrip — .NET Decompiler & CIL Disassembler in Rust
+# backtrip — .NET & JVM Decompiler in Rust
 
 [![crates.io](https://img.shields.io/crates/v/backtrip.svg)](https://crates.io/crates/backtrip)
 [![docs.rs](https://docs.rs/backtrip/badge.svg)](https://docs.rs/backtrip)
@@ -6,12 +6,19 @@
 [![Rust Edition](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org/)
 [![Build](https://img.shields.io/badge/build-cargo%20test-green.svg)](#tests)
 
-**backtrip** is a .NET decompiler and CIL disassembler written in Rust. It
-parses ECMA-335 PE/CLI metadata and CIL bytecode, then reconstructs readable
-C# source code from compiled .NET assemblies (`.dll` / `.exe`). It also
-provides IL disassembly, obfuscation detection, structural verification, and
-JSON metadata export — all from a single fast native binary with zero runtime
-dependencies.
+**backtrip** is a decompiler written in Rust with two independent back ends:
+
+- **.NET** — parses ECMA-335 PE/CLI metadata and CIL bytecode, then
+  reconstructs readable C# source from compiled assemblies (`.dll`/`.exe`),
+  with ildasm-style IL disassembly.
+- **Java** — parses JVM class files (`0xCAFEBABE`, JVMS chapter 4) and JVM
+  bytecode (JVMS chapter 6), then reconstructs readable Java source from
+  compiled `.class` files, with javap-style bytecode disassembly.
+
+Both share the same CLI and the same control-flow restructuring engine.
+backtrip also provides obfuscation detection, structural verification, and
+JSON metadata export for .NET — all from a single fast native binary with
+zero runtime dependencies.
 
 ## Why backtrip?
 
@@ -57,6 +64,33 @@ full pattern matching are not there yet (see
 - **Type, method, field, and parameter signatures** (ECMA-335 II.23)
 - **Complete CIL opcode table** (ECMA-335 III) and bytecode decoder
 - **IL disassembler** producing ildasm-style output
+
+### Java Class File Support
+
+- **Class file parsing** (JVMS chapter 4): full constant pool (all 17 tags,
+  modified UTF-8), access flags, fields, methods, and the attributes needed
+  for decompilation (`Code`, `ConstantValue`, `Exceptions`, `InnerClasses`,
+  `Signature`, `LocalVariableTable`, `BootstrapMethods`, `SourceFile`)
+- **Field/method descriptor parsing** (JVMS 4.3) with array and object types
+- **Generic `Signature` rendering** (JVMS 4.7.9.1): class/method type
+  parameters, parameterized types (`List<String>`), type variables and
+  wildcards (`? super T`) in declarations
+- **Complete JVM opcode table** (JVMS chapter 6, including `wide`,
+  `tableswitch`, `lookupswitch`, `invokedynamic`) and bytecode decoder
+- **Java source reconstruction**: classes/interfaces/enums, modifiers,
+  constants, javac-style `for`/`while` loops, `switch` inlining, ternary and
+  boolean-return reconstruction, `try`/`catch`/`finally` from the exception
+  table, and javac 9+ `invokedynamic` string concatenation decoded back into
+  `+` expressions from the BootstrapMethods recipe
+- **javap-style disassembler** (`--il` on a `.class` file)
+- **`.jar` archive support**: zip reading with a built-in raw-DEFLATE
+  decoder (no dependencies) — `--list`, filtered decompilation, and
+  disassembly work directly on real-world jars
+- Decompiled output **recompiles with `javac`** (verified by the test suite
+  against a real fixture)
+
+Inputs are detected by magic bytes (`MZ` vs `0xCAFEBABE`), not by file
+extension — the same commands work for both formats.
 
 ### C# Decompilation
 
@@ -149,6 +183,21 @@ backtrip path/to/Assembly.dll --detect-obfuscation
 
 # Verify decompiled output against metadata
 backtrip path/to/Assembly.dll --verify
+
+# Decompile a JVM class file to Java (auto-detected by magic bytes)
+backtrip path/to/HelloWorld.class
+
+# Decompile every class in a jar archive
+backtrip path/to/library.jar -o out/
+
+# javap-style bytecode disassembly of a class file
+backtrip path/to/HelloWorld.class --il --stdout
+
+# List the class name
+backtrip path/to/HelloWorld.class --list
+
+# Recursively decompile .dll/.exe/.class files in a directory
+backtrip ./build/ --recursive -o out/
 ```
 
 ### CLI Reference
@@ -285,6 +334,8 @@ See [`TODO.md`](TODO.md) for the full roadmap. Notable upcoming work:
 - Switch expressions with type patterns and property patterns
 - Round-trip IL diffing (recompiled IL never matches exactly; semantic
   comparison is future work)
+- Java: `.jar` archives (stored/deflated entries), generic `Signature`
+  rendering in method bodies, lambda (`LambdaMetafactory`) reconstruction, generic signatures on methods
 
 ## License
 

@@ -293,9 +293,9 @@ impl<'a> Reader<'a> {
                     let mut owner_name = String::new();
                     let type_defs = self.tables.get(tbl::TYPEDEF);
                     for (i, td) in type_defs.iter().enumerate() {
-                        let start = td.col(5) as u32;
-                        let next = type_defs.get(i + 1).map(|r| r.col(5) as u32)
-                            .unwrap_or_else(|| self.tables.row_count(tbl::METHODDEF) as u32 + 1);
+                        let start = td.col(5);
+                        let next = type_defs.get(i + 1).map(|r| r.col(5))
+                            .unwrap_or_else(|| self.tables.row_count(tbl::METHODDEF) + 1);
                         if decl_ci.row >= start && decl_ci.row < next {
                             owner_name = self.type_def_name(td);
                             break;
@@ -421,7 +421,7 @@ impl<'a> Reader<'a> {
                 }
                 let (len, len_bytes) = crate::metadata::streams::decode_compressed_uint(&val[*pos..]).ok()?;
                 *pos += len_bytes;
-                let end = *pos + len as usize;
+                let end = *pos + len;
                 if end > val.len() { return None; }
                 let s = std::str::from_utf8(&val[*pos..end]).ok()?;
                 *pos = end;
@@ -462,9 +462,9 @@ impl<'a> Reader<'a> {
                 let m_row = ctor.row;
                 let type_defs = self.tables.get(tbl::TYPEDEF);
                 for (i, td) in type_defs.iter().enumerate() {
-                    let start = td.col(5) as u32;
-                    let next = type_defs.get(i + 1).map(|r| r.col(5) as u32)
-                        .unwrap_or_else(|| self.tables.row_count(tbl::METHODDEF) as u32 + 1);
+                    let start = td.col(5);
+                    let next = type_defs.get(i + 1).map(|r| r.col(5))
+                        .unwrap_or_else(|| self.tables.row_count(tbl::METHODDEF) + 1);
                     if m_row >= start && m_row < next {
                         let name = self.type_def_name(td);
                         return Some(name);

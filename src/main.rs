@@ -1,24 +1,25 @@
 use clap::Parser;
 use std::path::PathBuf;
-use backtrip::{cil, decompile, error, metadata, output, pe};
+use backtrip::{cil, decompile, error, java, metadata, output, pe};
 
-/// backtrip - a .NET IL decompiler and CIL disassembler in Rust.
+/// backtrip - a .NET IL / JVM bytecode decompiler and disassembler in Rust.
 #[derive(Parser, Debug)]
 #[command(name = "backtrip", version, about)]
 struct Cli {
-    /// Path to the .NET assembly (.dll / .exe) to decompile, or a directory
-    /// when --recursive is used.
+    /// Path to the .NET assembly (.dll/.exe), Java class file (.class), or a
+    /// directory when --recursive is used.
     assembly: PathBuf,
 
     /// Output directory for decompiled files.
     #[arg(short, long, default_value = "decompiled")]
     output: PathBuf,
 
-    /// Emit CIL disassembly (ildasm-style) instead of C# source.
+    /// Emit CIL disassembly (ildasm-style) for .NET inputs, or javap-style
+    /// bytecode disassembly for Java class files.
     #[arg(long)]
     il: bool,
 
-    /// List types in the assembly and exit.
+    /// List types in the input and exit.
     #[arg(long)]
     list: bool,
 
@@ -31,7 +32,7 @@ struct Cli {
     #[arg(long)]
     stdout: bool,
 
-    /// Recursively decompile all .dll/.exe files in a directory.
+    /// Recursively decompile all .dll/.exe/.class files in a directory.
     #[arg(long)]
     recursive: bool,
 
@@ -68,9 +69,16 @@ fn run() -> error::Result<()> {
     decompile_one(&cli)
 }
 
-/// Decompile a single assembly file.
+/// Decompile a single input file (.NET assembly, Java class file, or jar).
+/// The format is detected from the magic bytes: `MZ` → .NET PE,
+/// `0xCAFEBABE` → JVM class file, `PK\x03\x04` → jar archive.
 fn decompile_one(cli: &Cli) -> error::Result<()> {
     let data = std::fs::read(&cli.assembly)?;
+    if data.len() >= 4
+        && (data[..4] == [0xCA, 0xFE, 0xBA, 0xBE] || data[..4] == [0x50, 0x4B, 0x03, 0x04])
+    {
+        return decompile_java(cli, &data);
+    }
     let pe = pe::PeImage::parse(data)?;
     let (root, tables) = metadata::load(&pe)?;
     let reader = metadata::Reader::new(&pe, &root, &tables)?;
@@ -147,6 +155,128 @@ fn decompile_one(cli: &Cli) -> error::Result<()> {
     Ok(())
 }
 
+/// Decompile a JVM class file: Java source (default) or javap-style
+/// disassembly (--il). Mirrors the .NET CLI surface where applicable.
+fn decompile_java(cli: &Cli, data: &[u8]) -> error::Result<()> {
+    let is_jar = data.len() >= 4 && data[..4] == [0x50, 0x4B, 0x03, 0x04];
+
+    if cli.list {
+        if is_jar {
+            for name in decompile::java::jar_class_names(data)? {
+                println!("{name}");
+            }
+        } else {
+            println!("{}", decompile::java::list_name(data)?);
+        }
+        return Ok(());
+    }
+    if cli.json {
+        return Err(error::Error::Usage(
+            "--json is not supported for Java class files".into(),
+        ));
+    }
+    if cli.detect_obfuscation {
+        return Err(error::Error::Usage(
+            "--detect-obfuscation is not supported for Java class files".into(),
+        ));
+    }
+    if cli.verify {
+        return Err(error::Error::Usage(
+            "--verify is not supported for Java class files".into(),
+        ));
+    }
+    // A class file contains exactly one class, so --stdout works without
+    // --type here (unlike assemblies, where --type selects among many).
+
+    // Name filter: match the simple or fully-qualified class name.
+    let matches_filter = |name: &str, pkg: &str| -> bool {
+        match cli.type_name.as_deref() {
+            None => true,
+            Some(q) => name == q || format!("{pkg}.{name}") == q,
+        }
+    };
+
+    // Parse every class input into (classfile, source) pairs. Broken jar
+    // entries are skipped instead of failing the whole archive.
+    let mut units: Vec<(java::ClassFile, decompile::DecompiledType)> = Vec::new();
+    if is_jar {
+        for entry in java::jar::read_entries(data)? {
+            if !entry.name.ends_with(".class") {
+                continue;
+            }
+            if let Ok(cf) = java::ClassFile::parse(&entry.data)
+                && let Ok(t) = decompile::java::decompile_class(&cf) {
+                    units.push((cf, t));
+                }
+        }
+    } else {
+        let cf = java::ClassFile::parse(data)?;
+        let t = decompile::java::decompile_class_file(data)?;
+        units.push((cf, t));
+    }
+
+    if cli.il {
+        let mut types = Vec::new();
+        for (cf, _) in &units {
+            if !matches_filter(&cf.simple_name(), &cf.package()) {
+                continue;
+            }
+            let source = java::disasm::disassemble_class(cf)?;
+            types.push(decompile::DecompiledType {
+                file_name: java_disasm_file_name(cf),
+                source,
+            });
+        }
+        if types.is_empty() {
+            return Err(error::Error::NotFound(format!(
+                "no class matching '{}'",
+                cli.type_name.as_deref().unwrap_or("")
+            )));
+        }
+        if cli.stdout {
+            for t in &types {
+                print!("{}", t.source);
+            }
+            return Ok(());
+        }
+        let n = output::write_types(&cli.output, &types)?;
+        println!("Wrote {n} disassembly file(s) to {}", cli.output.display());
+        return Ok(());
+    }
+
+    let types: Vec<decompile::DecompiledType> = units
+        .iter()
+        .filter(|(cf, _)| matches_filter(&cf.simple_name(), &cf.package()))
+        .map(|(_, t)| t.clone())
+        .collect();
+    if types.is_empty() {
+        return Err(error::Error::NotFound(format!(
+            "no class matching '{}'",
+            cli.type_name.as_deref().unwrap_or("")
+        )));
+    }
+    if cli.stdout {
+        for t in &types {
+            print!("{}", t.source);
+        }
+        return Ok(());
+    }
+    let n = output::write_types(&cli.output, &types)?;
+    println!("Wrote {n} file(s) to {}", cli.output.display());
+    Ok(())
+}
+
+fn java_disasm_file_name(cf: &java::ClassFile) -> String {
+    let simple = cf.simple_name();
+    let pkg = cf.package();
+    let stem = if pkg.is_empty() {
+        simple
+    } else {
+        format!("{}_{}", pkg.replace('.', "_"), simple)
+    };
+    format!("{stem}.jbc")
+}
+
 /// Recursively find and decompile all .dll/.exe files in a directory.
 fn run_recursive(cli: &Cli) -> error::Result<()> {
     if !cli.assembly.is_dir() {
@@ -217,7 +347,7 @@ fn collect_assemblies(dir: &PathBuf, out: &mut Vec<PathBuf>) -> error::Result<()
             collect_assemblies(&path, out)?;
         } else if let Some(ext) = path.extension() {
             let ext = ext.to_ascii_lowercase();
-            if ext == "dll" || ext == "exe" {
+            if ext == "dll" || ext == "exe" || ext == "class" || ext == "jar" {
                 out.push(path);
             }
         }
@@ -273,7 +403,7 @@ fn decompile_il(reader: &metadata::Reader<'_>, filter: Option<&str>) -> error::R
         }
         let source = il_for_type(reader, row_idx)?;
         let file_name = {
-            let clean = name.replace('`', "_").replace('/', "_");
+            let clean = name.replace(['`', '/'], "_");
             if ns.is_empty() {
                 format!("{clean}.il")
             } else {

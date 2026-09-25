@@ -1079,3 +1079,335 @@ fn cli_verify_clean_assembly() {
     assert!(report.contains("Verified") && report.contains("types"),
         "should report verification summary;\n{}", report);
 }
+
+// ---- Java class file decompilation -----------------------------------------
+
+fn java_fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/java/bin/demo")
+        .join(name)
+}
+
+fn decompile_java(name: &str) -> backtrip::decompile::DecompiledType {
+    let data = std::fs::read(java_fixture(name)).expect("read class file");
+    backtrip::decompile::java::decompile_class_file(&data).expect("decompile class")
+}
+
+#[test]
+fn java_list_name() {
+    let data = std::fs::read(java_fixture("Sample.class")).unwrap();
+    let name = backtrip::decompile::java::list_name(&data).unwrap();
+    assert_eq!(name, "demo.Sample");
+}
+
+#[test]
+fn java_decompiles_sample_class() {
+    let t = decompile_java("Sample.class");
+    assert_eq!(t.file_name, "demo_Sample.java");
+    assert!(t.source.contains("package demo;"));
+    assert!(t.source.contains("public class Sample"));
+    // static final with ConstantValue
+    assert!(t.source.contains("public static final int MAX = 100;"));
+    // fields
+    assert!(t.source.contains("private int count;"));
+    assert!(t.source.contains("private String name;"));
+    // constructor with field init
+    assert!(t.source.contains("this.name = arg0;"));
+    // arithmetic
+    assert!(t.source.contains("public int add(int arg0, int arg1)"));
+    assert!(t.source.contains("return arg0 + arg1;"));
+    // if/else with return
+    assert!(t.source.contains("if (arg0 < 0) {"));
+    assert!(t.source.contains("return -arg0;"));
+    // for loop from javac back-edge shape (increment folded into the header)
+    assert!(t.source.contains("for (var V_3 = 1; V_3 <= arg0; V_3 = V_3 + 1) {"));
+    assert!(t.source.contains("for (var V_3 = 0; V_3 < arg0; V_3 += 1) {"));
+    // invokedynamic string concat recipe
+    assert!(t.source.contains("return \"Hello, \" + arg0 + \"!\";"));
+    // switch inlining
+    assert!(t.source.contains("case 0:"));
+    assert!(t.source.contains("return \"Sunday\";"));
+    assert!(t.source.contains("default:"));
+    // arrays
+    assert!(t.source.contains("arg0[arg0.length") == false); // no bogus render
+    assert!(t.source.contains("V_2 + arg0[V_3];"));
+    // try/catch/finally from exception table
+    assert!(t.source.contains("try {"));
+    assert!(t.source.contains("catch (ArithmeticException e) {"));
+    assert!(t.source.contains("finally {"));
+    // boolean return reconstruction
+    assert!(t.source.contains("return arg0 > 0;"));
+    // no leftover gotos (Java has no goto)
+    assert!(!t.source.contains("\ngoto "), "goto must be commented:\n{}", t.source);
+}
+
+#[test]
+fn java_decompiled_sample_recompiles_with_javac() {
+    // The decompiled source must be valid, compilable Java.
+    if std::process::Command::new("javac").arg("-version").output().is_err() {
+        eprintln!("javac not available — skipping compile check");
+        return;
+    }
+    let t = decompile_java("Sample.class");
+    let dir = std::env::temp_dir().join(format!("backtrip_rt_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("Sample.java"); // public class Sample → must match name
+    std::fs::write(&path, &t.source).unwrap();
+    let out = std::process::Command::new("javac")
+        .arg("-d")
+        .arg(&dir)
+        .arg(&path)
+        .output()
+        .expect("run javac");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "decompiled Java should recompile:\n{}\n---\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        t.source
+    );
+}
+
+#[test]
+fn java_enum_renders_constants() {
+    let t = decompile_java("Color.class");
+    assert!(t.source.contains("public enum Color"));
+    assert!(t.source.contains("RED, GREEN, BLUE;"));
+    // compiler-generated members are suppressed
+    assert!(!t.source.contains("values()"));
+    assert!(!t.source.contains("$VALUES"));
+    assert!(!t.source.contains("extends Enum"));
+}
+
+#[test]
+fn java_interface_renders_default_method() {
+    let t = decompile_java("Shape.class");
+    assert!(t.source.contains("public interface Shape"));
+    assert!(t.source.contains("double area();"));
+    assert!(t.source.contains("public double perimeter() {"));
+    assert!(t.source.contains("return 0.0;"));
+}
+
+#[test]
+fn java_cli_list_and_disasm() {
+    let bin = backtrip_bin();
+    let list = std::process::Command::new(&bin)
+        .arg(java_fixture("Sample.class"))
+        .arg("--list")
+        .output()
+        .expect("run backtrip --list");
+    assert!(list.status.success());
+    assert_eq!(String::from_utf8_lossy(&list.stdout).trim(), "demo.Sample");
+
+    let dis = std::process::Command::new(&bin)
+        .arg(java_fixture("Sample.class"))
+        .arg("--il")
+        .arg("--stdout")
+        .output()
+        .expect("run backtrip --il");
+    assert!(dis.status.success());
+    let text = String::from_utf8_lossy(&dis.stdout);
+    assert!(text.contains("class demo.Sample"), "javap-style header;\n{}", text);
+    assert!(text.contains("getfield") && text.contains("invokedynamic"),
+        "bytecode mnemonics;\n{}", text);
+    assert!(text.contains("Exception table:"), "exception table;\n{}", text);
+    assert!(text.contains("public add(int, int) -> int"));
+}
+
+#[test]
+fn java_cli_rejects_dotnet_only_flags() {
+    let bin = backtrip_bin();
+    for flag in ["--json", "--verify", "--detect-obfuscation"] {
+        let out = std::process::Command::new(&bin)
+            .arg(java_fixture("Sample.class"))
+            .arg(flag)
+            .output()
+            .expect("run backtrip");
+        assert!(!out.status.success(), "{flag} should fail on a class file");
+    }
+}
+
+#[test]
+fn magic_detection_prefers_java_over_extension() {
+    // A class file named with a foreign extension is still detected as Java
+    // by magic bytes.
+    let tmp = std::env::temp_dir().join(format!("backtrip_magic_{}.bin", std::process::id()));
+    std::fs::copy(java_fixture("Sample.class"), &tmp).unwrap();
+    let out = std::process::Command::new(backtrip_bin())
+        .arg(&tmp)
+        .arg("--list")
+        .output()
+        .expect("run backtrip");
+    let _ = std::fs::remove_file(&tmp);
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "demo.Sample");
+}
+
+#[test]
+fn java_generic_signature_rendering() {
+    let t = decompile_java("Box.class");
+    // class type params from the class Signature attribute
+    assert!(t.source.contains("public class Box<T>"));
+    // field Signature attribute beats the erased descriptor
+    assert!(t.source.contains("private T value;"));
+    assert!(t.source.contains("private java.util.List<T> items;"));
+    // method Signature: params, return, wildcards, method type params
+    assert!(t.source.contains("public Box(T arg0)"));
+    assert!(t.source.contains("public T getValue()"));
+    assert!(t.source.contains("public java.util.Map<String, T> asMap()"));
+    assert!(t.source.contains(
+        "public <U> java.util.List<U> map(java.util.function.Function<? super T, ? extends U> arg0)"
+    ));
+    // enhanced-for reconstruction from the lowered iterator pattern
+    assert!(t.source.contains("for (var V_4 : this.items) {"));
+    // no double-paren while conditions
+    assert!(!t.source.contains("while (("));
+    // decompiled generics still compile
+    if std::process::Command::new("javac").arg("-version").output().is_err() {
+        eprintln!("javac not available — skipping compile check");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("backtrip_box_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("Box.java");
+    std::fs::write(&path, &t.source).unwrap();
+    let out = std::process::Command::new("javac")
+        .arg("-d")
+        .arg(&dir)
+        .arg(&path)
+        .output()
+        .expect("run javac");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "decompiled generic Java should recompile:\n{}\n---\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        t.source
+    );
+}
+
+#[test]
+fn java_synchronized_reconstruction() {
+    let t = decompile_java("Sync.class");
+    // synchronized method modifier
+    assert!(t.source.contains("public synchronized void inc()"));
+    // block reconstruction from monitor enter/exit + EH machinery
+    assert!(t.source.contains("synchronized (this.lock) {"));
+    assert!(t.source.contains("this.count = this.count + arg0;"));
+    // compiler machinery fully suppressed
+    assert!(!t.source.contains("monitor enter"), "no monitor comments:\n{}", t.source);
+    assert!(!t.source.contains("monitor exit"), "no monitor comments:\n{}", t.source);
+    assert!(!t.source.contains("finally {"), "no EH machinery:\n{}", t.source);
+    assert!(!t.source.contains("throw e"), "no rethrow:\n{}", t.source);
+    // no leftover label/goto noise
+    assert!(!t.source.contains("// Label_"), "no label comments:\n{}", t.source);
+    assert!(!t.source.contains("// goto"), "no goto comments:\n{}", t.source);
+
+    // recompile check
+    if std::process::Command::new("javac").arg("-version").output().is_err() {
+        eprintln!("javac not available — skipping compile check");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("backtrip_sync_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("Sync.java");
+    std::fs::write(&path, &t.source).unwrap();
+    let out = std::process::Command::new("javac")
+        .arg("-d")
+        .arg(&dir)
+        .arg(&path)
+        .output()
+        .expect("run javac");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "decompiled synchronized Java should recompile:\n{}\n---\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        t.source
+    );
+}
+
+// ---- .jar archive support ---------------------------------------------------
+
+fn java_fixture_jar(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/java")
+        .join(name)
+}
+
+#[test]
+fn jar_lists_and_decompiles_all_classes() {
+    let data = std::fs::read(java_fixture_jar("demo.jar")).expect("read jar");
+    let names = backtrip::decompile::java::jar_class_names(&data).unwrap();
+    assert_eq!(
+        names,
+        vec!["demo.Box", "demo.Color", "demo.Sample", "demo.Shape", "demo.Sync"]
+    );
+
+    let types = backtrip::decompile::java::decompile_jar(&data).unwrap();
+    assert_eq!(types.len(), 5);
+    let sample = types.iter().find(|t| t.file_name == "demo_Sample.java").unwrap();
+    assert!(sample.source.contains("public class Sample"));
+    assert!(sample.source.contains("return arg0 + arg1;"));
+}
+
+#[test]
+fn jar_stored_variant_also_reads() {
+    let data = std::fs::read(java_fixture_jar("demo-stored.jar")).expect("read jar");
+    let names = backtrip::decompile::java::jar_class_names(&data).unwrap();
+    assert!(names.contains(&"demo.Shape".to_string()));
+}
+
+#[test]
+fn cli_jar_list_type_and_disasm() {
+    let bin = backtrip_bin();
+    let jar = java_fixture_jar("demo.jar");
+
+    let list = std::process::Command::new(&bin).arg(&jar).arg("--list").output().unwrap();
+    assert!(list.status.success());
+    let out = String::from_utf8_lossy(&list.stdout);
+    assert!(out.contains("demo.Sample") && out.contains("demo.Color"));
+
+    let one = std::process::Command::new(&bin)
+        .arg(&jar)
+        .arg("--type")
+        .arg("demo.Color")
+        .arg("--stdout")
+        .output()
+        .unwrap();
+    assert!(one.status.success());
+    assert!(String::from_utf8_lossy(&one.stdout).contains("public enum Color"));
+
+    let dis = std::process::Command::new(&bin)
+        .arg(&jar)
+        .arg("--type")
+        .arg("demo.Sample")
+        .arg("--il")
+        .arg("--stdout")
+        .output()
+        .unwrap();
+    assert!(dis.status.success());
+    let text = String::from_utf8_lossy(&dis.stdout);
+    assert!(text.contains("class demo.Sample"));
+    assert!(text.contains("getfield"));
+}
+
+#[test]
+fn cli_rejects_broken_jar_entries_gracefully() {
+    // A jar whose class entries are corrupt still lists (names come from the
+    // central directory) and decompiles the remainder instead of failing.
+    // Uses the stored jar so the raw class bytes are directly corruptible.
+    let data = std::fs::read(java_fixture_jar("demo-stored.jar")).unwrap();
+    let mut broken = data.clone();
+    let pos = broken
+        .windows(4)
+        .position(|w| w == [0xCA, 0xFE, 0xBA, 0xBE])
+        .expect("stored jar contains raw class bytes");
+    broken[pos..pos + 4].copy_from_slice(&[0, 0, 0, 0]);
+    let types = backtrip::decompile::java::decompile_jar(&broken).unwrap();
+    assert!(
+        types.len() < 5 && !types.is_empty(),
+        "should decompile the healthy subset, got {}",
+        types.len()
+    );
+}

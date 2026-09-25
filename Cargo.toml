@@ -2,14 +2,14 @@
 name = "backtrip"
 version = "0.1.2"
 edition = "2024"
-description = "A .NET IL decompiler and CIL disassembler in Rust — turns .NET assemblies (.dll/.exe) back into readable, recompilable C# or IL disassembly, with round-trip verification"
+description = "A decompiler in Rust — turns .NET assemblies (.dll/.exe) into C# and JVM class files (.class) into Java, with IL/javap-style disassembly and round-trip verification"
 license = "Apache-2.0"
 keywords = [
     "decompiler",
     "dotnet",
     "cil",
-    "il",
-    "csharp"
+    "java",
+    "jvm",
 ]
 categories = [
     "command-line-utilities",

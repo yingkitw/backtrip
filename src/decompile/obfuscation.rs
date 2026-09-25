@@ -58,11 +58,10 @@ pub fn detect_obfuscation(reader: &Reader<'_>) -> Result<Vec<ObfuscationWarning>
             }
 
             // Check for large switch statements (control-flow flattening indicator)
-            if let Some(switch_cases) = count_switch_cases(reader, m) {
-                if switch_cases > max_switch_cases {
+            if let Some(switch_cases) = count_switch_cases(reader, m)
+                && switch_cases > max_switch_cases {
                     max_switch_cases = switch_cases;
                 }
-            }
         }
     }
 
@@ -175,11 +174,10 @@ fn count_switch_cases(reader: &Reader<'_>, m: &crate::metadata::tables::Row) -> 
     let body = reader.method_body(rva).ok()??;
     let instructions = crate::cil::decoder::decode(&body.code).ok()?;
     for ins in &instructions {
-        if ins.name == "switch" {
-            if let crate::cil::decoder::Operand::Switch(targets) = &ins.operand {
+        if ins.name == "switch"
+            && let crate::cil::decoder::Operand::Switch(targets) = &ins.operand {
                 return Some(targets.len());
             }
-        }
     }
     None
 }
@@ -201,8 +199,8 @@ fn detect_string_encryption(reader: &Reader<'_>) -> Option<usize> {
         for mi in reader.type_method_rows(row_idx) {
             let m = &reader.tables.get(tbl::METHODDEF)[mi];
             let rva = reader.method_rva(m);
-            if let Some(body) = reader.method_body(rva).ok().flatten() {
-                if let Ok(instructions) = crate::cil::decoder::decode(&body.code) {
+            if let Some(body) = reader.method_body(rva).ok().flatten()
+                && let Ok(instructions) = crate::cil::decoder::decode(&body.code) {
                     let mut prev_was_ldstr = false;
                     for ins in &instructions {
                         if ins.name == "ldstr" {
@@ -217,13 +215,12 @@ fn detect_string_encryption(reader: &Reader<'_>) -> Option<usize> {
                         }
                     }
                 }
-            }
         }
     }
 
     // If any single method is called with string literals more than 10 times,
     // it's suspicious for string encryption.
-    for (_, count) in &call_counts {
+    for count in call_counts.values() {
         if *count > 10 {
             return Some(*count);
         }
